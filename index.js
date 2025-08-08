@@ -62,11 +62,12 @@ const commands = [
         .setDescription('Control the voice kick bot')
         .addStringOption(option =>
             option.setName('action')
-                .setDescription('Turn the bot on or off')
+                .setDescription('Turn the bot on/off or check status')
                 .setRequired(true)
                 .addChoices(
                     { name: 'on', value: 'on' },
-                    { name: 'off', value: 'off' }
+                    { name: 'off', value: 'off' },
+                    { name: 'check', value: 'check' }
                 ))
 ];
 
@@ -109,8 +110,7 @@ client.on('interactionCreate', async interaction => {
         if (interaction.user.id === targetUserId) {
             console.log(`Target user ${interaction.user.tag} tried to use /wk command - blocking`);
             await interaction.reply({ 
-                content: '🚫 You cannot control this bot!', 
-                ephemeral: true 
+                content: '🚫 You cannot control this bot!'
             });
             return;
         }
@@ -119,19 +119,38 @@ client.on('interactionCreate', async interaction => {
         console.log(`Action: ${action}`);
         
         if (action === 'on') {
-            botEnabled = true;
-            await interaction.reply({ 
-                content: '✅ Voice kick bot is now **ENABLED**', 
-                ephemeral: true 
-            });
-            console.log(`Bot enabled by ${interaction.user.tag}`);
+            if (botEnabled) {
+                await interaction.reply({ 
+                    content: '⚠️ Voice kick bot is already **ENABLED**!'
+                });
+            } else {
+                botEnabled = true;
+                await interaction.reply({ 
+                    content: '✅ Voice kick bot is now **ENABLED**'
+                });
+                console.log(`Bot enabled by ${interaction.user.tag}`);
+            }
         } else if (action === 'off') {
-            botEnabled = false;
+            if (!botEnabled) {
+                await interaction.reply({ 
+                    content: '⚠️ Voice kick bot is already **DISABLED**!'
+                });
+            } else {
+                botEnabled = false;
+                await interaction.reply({ 
+                    content: '🛑 Voice kick bot is now **DISABLED**'
+                });
+                console.log(`Bot disabled by ${interaction.user.tag}`);
+            }
+        } else if (action === 'check') {
+            const status = botEnabled ? '**ENABLED** ✅' : '**DISABLED** 🛑';
+            const targetUser = await client.users.fetch(targetUserId).catch(() => null);
+            const targetName = targetUser ? `${targetUser.tag}` : `User ID: ${targetUserId}`;
+            
             await interaction.reply({ 
-                content: '🛑 Voice kick bot is now **DISABLED**', 
-                ephemeral: true 
+                content: `📊 **Bot Status:** ${status}\n👤 **Target User:** ${targetName}`
             });
-            console.log(`Bot disabled by ${interaction.user.tag}`);
+            console.log(`Status checked by ${interaction.user.tag}`);
         }
     }
 });

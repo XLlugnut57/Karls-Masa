@@ -127,7 +127,7 @@ client.on('interactionCreate', async interaction => {
     }
 });
 
-// Voice state update event - triggers when someone joins/leaves/updates voice channel
+// Voice state update event - triggers when someone joins/leaves/updates voice channel --
 client.on('voiceStateUpdate', (oldState, newState) => {
     // Check if bot is disabled
     if (!botEnabled) return;

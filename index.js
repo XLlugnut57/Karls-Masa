@@ -1,4 +1,5 @@
 const {Client, GatewayIntentBits} = require("discord.js");
+const http = require('http');
 
 // Use environment variables in production, fallback to config.json for local development
 let token, targetUserId;
@@ -27,6 +28,22 @@ if (process.env.DISCORD_TOKEN && process.env.TARGET_USER_ID) {
         process.exit(1);
     }
 }
+
+// Create HTTP server for Railway health checks
+const PORT = process.env.PORT || 3000;
+const server = http.createServer((req, res) => {
+    if (req.url === '/') {
+        res.writeHead(200, { 'Content-Type': 'text/plain' });
+        res.end('Discord bot is running!');
+    } else {
+        res.writeHead(404, { 'Content-Type': 'text/plain' });
+        res.end('Not found');
+    }
+});
+
+server.listen(PORT, () => {
+    console.log(`Health check server running on port ${PORT}`);
+});
 
 const client = new Client({ 
     intents: [

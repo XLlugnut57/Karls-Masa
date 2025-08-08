@@ -1,4 +1,4 @@
-const {Client, GatewayIntentBits} = require("discord.js");
+const {Client, GatewayIntentBits, SlashCommandBuilder, REST, Routes} = require("discord.js");
 const http = require('http');
 
 // Use environment variables in production, fallback to config.json for local development
@@ -29,6 +29,9 @@ if (process.env.DISCORD_TOKEN && process.env.TARGET_USER_ID) {
     }
 }
 
+// Bot state
+let botEnabled = true;
+
 // Create HTTP server for Railway health checks
 const PORT = process.env.PORT || 3000;
 const server = http.createServer((req, res) => {
@@ -52,28 +55,112 @@ const client = new Client({
     ] 
 });
 
+// Register slash commands
+const commands = [
+    new SlashCommandBuilder()
+        .setName('wk')
+        .setDescription('Control the voice kick bot')
+        .addStringOption(option =>
+            option.setName('action')
+                .setDescription('Turn the bot on or off')
+                .setRequired(true)
+                .addChoices(
+                    { name: 'on', value: 'on' },
+                    { name: 'off', value: 'off' }
+                ))
+];
+
 // Bot ready event
-client.once('ready', () => {
+client.once('ready', async () => {
     console.log(`Bot logged in as ${client.user.tag}!`);
     console.log(`Monitoring voice channels for user ID: ${targetUserId}`);
+    console.log(`Bot status: ${botEnabled ? 'ENABLED' : 'DISABLED'}`);
+    
+    // Register slash commands
+    const rest = new REST().setToken(token);
+    
+    try {
+        console.log('Started refreshing application (/) commands.');
+        
+        await rest.put(
+            Routes.applicationCommands(client.user.id),
+            { body: commands },
+        );
+        
+        console.log('Successfully reloaded application (/) commands.');
+    } catch (error) {
+        console.error('Error registering slash commands:', error);
+    }
+});
+
+// Handle slash commands
+client.on('interactionCreate', async interaction => {
+    if (!interaction.isChatInputCommand()) return;
+    
+    if (interaction.commandName === 'wk') {
+        // Check if the user is the target user (prevent them from using the command)
+        if (interaction.user.id === targetUserId) {
+            await interaction.reply({ 
+                content: '🚫 You cannot control this bot!', 
+                ephemeral: true 
+            });
+            return;
+        }
+        
+        const action = interaction.options.getString('action');
+        
+        if (action === 'on') {
+            botEnabled = true;
+            await interaction.reply({ 
+                content: '✅ Voice kick bot is now **ENABLED**', 
+                ephemeral: true 
+            });
+            console.log(`Bot enabled by ${interaction.user.tag}`);
+        } else if (action === 'off') {
+            botEnabled = false;
+            await interaction.reply({ 
+                content: '🛑 Voice kick bot is now **DISABLED**', 
+                ephemeral: true 
+            });
+            console.log(`Bot disabled by ${interaction.user.tag}`);
+        }
+    }
 });
 
 // Voice state update event - triggers when someone joins/leaves/updates voice channel
 client.on('voiceStateUpdate', (oldState, newState) => {
+    // Check if bot is disabled
+    if (!botEnabled) return;
+    
     // Check if the state change is for our target user
     if (newState.member.id !== targetUserId) return;
     
     // Check if the user is in a voice channel
     if (!newState.channel) return;
     
-    // Check if the user just deafened themselves
+    // Check if user just joined and is already deafened
+    if (!oldState.channel && newState.channel && newState.selfDeaf) {
+        console.log(`Target user ${newState.member.user.tag} joined ${newState.channel.name} while already deafened`);
+        
+        // Kick them from the voice channel
+        newState.member.voice.disconnect('Auto-kicked for joining while deafened')
+            .then(() => {
+                console.log(`Successfully kicked ${newState.member.user.tag} from voice channel (joined deafened)`);
+            })
+            .catch(error => {
+                console.error(`Failed to kick user: ${error.message}`);
+            });
+        return;
+    }
+    
+    // Check if the user just deafened themselves (original functionality)
     if (!oldState.selfDeaf && newState.selfDeaf) {
         console.log(`Target user ${newState.member.user.tag} has deafened themselves in ${newState.channel.name}`);
         
         // Kick them from the voice channel
         newState.member.voice.disconnect('Auto-kicked for deafening')
             .then(() => {
-                console.log(`Successfully kicked ${newState.member.user.tag} from voice channel`);
+                console.log(`Successfully kicked ${newState.member.user.tag} from voice channel (deafened)`);
             })
             .catch(error => {
                 console.error(`Failed to kick user: ${error.message}`);

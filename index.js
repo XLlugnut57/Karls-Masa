@@ -73,6 +73,7 @@ const commands = [
 // Bot ready event
 client.once('ready', async () => {
     console.log(`Bot logged in as ${client.user.tag}!`);
+    console.log(`Bot ID: ${client.user.id}`);
     console.log(`Monitoring voice channels for user ID: ${targetUserId}`);
     console.log(`Bot status: ${botEnabled ? 'ENABLED' : 'DISABLED'}`);
     
@@ -82,24 +83,31 @@ client.once('ready', async () => {
     try {
         console.log('Started refreshing application (/) commands.');
         
-        await rest.put(
+        const data = await rest.put(
             Routes.applicationCommands(client.user.id),
             { body: commands },
         );
         
-        console.log('Successfully reloaded application (/) commands.');
+        console.log(`Successfully reloaded ${data.length} application (/) commands.`);
+        console.log('Commands registered:', data.map(cmd => cmd.name));
     } catch (error) {
         console.error('Error registering slash commands:', error);
+        console.error('Error details:', error.code, error.message);
     }
 });
 
 // Handle slash commands
 client.on('interactionCreate', async interaction => {
+    console.log(`Received interaction: ${interaction.type} - ${interaction.commandName}`);
+    
     if (!interaction.isChatInputCommand()) return;
     
     if (interaction.commandName === 'wk') {
+        console.log(`/wk command used by ${interaction.user.tag} (${interaction.user.id})`);
+        
         // Check if the user is the target user (prevent them from using the command)
         if (interaction.user.id === targetUserId) {
+            console.log(`Target user ${interaction.user.tag} tried to use /wk command - blocking`);
             await interaction.reply({ 
                 content: '🚫 You cannot control this bot!', 
                 ephemeral: true 
@@ -108,6 +116,7 @@ client.on('interactionCreate', async interaction => {
         }
         
         const action = interaction.options.getString('action');
+        console.log(`Action: ${action}`);
         
         if (action === 'on') {
             botEnabled = true;

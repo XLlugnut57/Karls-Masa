@@ -44,6 +44,37 @@ function updateBotStatus() {
     console.log(`Bot status updated: ${botEnabled ? 'MONITORING (Online)' : 'DISABLED (Idle)'}`);
 }
 
+// Function to check if target user is currently deafened in any voice channel
+async function checkTargetUserDeafened() {
+    try {
+        // Get all guilds the bot is in
+        for (const [guildId, guild] of client.guilds.cache) {
+            // Find the target user's voice state in this guild
+            const voiceState = guild.voiceStates.cache.get(targetUserId);
+            
+            if (voiceState && voiceState.channel && voiceState.selfDeaf) {
+                console.log(`Found target user ${voiceState.member.user.tag} deafened in ${voiceState.channel.name} when bot was enabled`);
+                
+                // Kick them from the voice channel
+                voiceState.member.voice.disconnect('Auto-kicked for being deafened when bot was enabled')
+                    .then(() => {
+                        console.log(`Successfully kicked ${voiceState.member.user.tag} from voice channel (was deafened when enabled)`);
+                    })
+                    .catch(error => {
+                        console.error(`Failed to kick user: ${error.message}`);
+                    });
+                
+                return true; // Found and handled
+            }
+        }
+        console.log('Target user not found deafened in any voice channels');
+        return false;
+    } catch (error) {
+        console.error('Error checking target user voice state:', error);
+        return false;
+    }
+}
+
 // Create HTTP server for Railway health checks
 const PORT = process.env.PORT || 3000;
 const server = http.createServer((req, res) => {
@@ -141,9 +172,19 @@ client.on('interactionCreate', async interaction => {
             } else {
                 botEnabled = true;
                 updateBotStatus();
-                await interaction.reply({ 
-                    content: '✅ Voice kick bot is now **ENABLED**'
-                });
+                
+                // Check if target user is already deafened when bot is enabled
+                const wasDeafened = await checkTargetUserDeafened();
+                
+                if (wasDeafened) {
+                    await interaction.reply({ 
+                        content: '✅ Voice kick bot is now **ENABLED**\n🦵 Target user was already deafened and has been kicked!'
+                    });
+                } else {
+                    await interaction.reply({ 
+                        content: '✅ Voice kick bot is now **ENABLED**'
+                    });
+                }
                 console.log(`Bot enabled by ${interaction.user.tag}`);
             }
         } else if (action === 'off') {

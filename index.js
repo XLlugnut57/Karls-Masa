@@ -1,4 +1,4 @@
-const {Client, GatewayIntentBits, SlashCommandBuilder, REST, Routes} = require("discord.js");
+const {Client, GatewayIntentBits, SlashCommandBuilder, REST, Routes, ActivityType} = require("discord.js");
 const http = require('http');
 
 // Use environment variables in production, fallback to config.json for local development
@@ -31,6 +31,18 @@ if (process.env.DISCORD_TOKEN && process.env.TARGET_USER_ID) {
 
 // Bot state
 let botEnabled = true;
+
+// Function to update bot status
+function updateBotStatus() {
+    if (botEnabled) {
+        client.user.setActivity('👁️ Watching Karl', { type: ActivityType.Custom });
+        client.user.setStatus('online');
+    } else {
+        client.user.setActivity('😴 Sleeping', { type: ActivityType.Custom });
+        client.user.setStatus('idle');
+    }
+    console.log(`Bot status updated: ${botEnabled ? 'MONITORING (Online)' : 'DISABLED (Idle)'}`);
+}
 
 // Create HTTP server for Railway health checks
 const PORT = process.env.PORT || 3000;
@@ -77,6 +89,9 @@ client.once('ready', async () => {
     console.log(`Bot ID: ${client.user.id}`);
     console.log(`Monitoring voice channels for user ID: ${targetUserId}`);
     console.log(`Bot status: ${botEnabled ? 'ENABLED' : 'DISABLED'}`);
+    
+    // Set initial bot status
+    updateBotStatus();
     
     // Register slash commands
     const rest = new REST().setToken(token);
@@ -125,6 +140,7 @@ client.on('interactionCreate', async interaction => {
                 });
             } else {
                 botEnabled = true;
+                updateBotStatus();
                 await interaction.reply({ 
                     content: '✅ Voice kick bot is now **ENABLED**'
                 });
@@ -137,6 +153,7 @@ client.on('interactionCreate', async interaction => {
                 });
             } else {
                 botEnabled = false;
+                updateBotStatus();
                 await interaction.reply({ 
                     content: '🛑 Voice kick bot is now **DISABLED**'
                 });

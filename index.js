@@ -1,8 +1,24 @@
 const {Client, GatewayIntentBits} = require("discord.js");
 
 // Use environment variables in production, fallback to config.json for local development
-const token = process.env.DISCORD_TOKEN || require("./config.json").token;
-const targetUserId = process.env.TARGET_USER_ID || require("./config.json").targetUserId;
+let token, targetUserId;
+
+if (process.env.DISCORD_TOKEN && process.env.TARGET_USER_ID) {
+    // Production environment (Railway)
+    token = process.env.DISCORD_TOKEN;
+    targetUserId = process.env.TARGET_USER_ID;
+} else {
+    // Local development
+    try {
+        const config = require("./config.json");
+        token = config.token;
+        targetUserId = config.targetUserId;
+    } catch (error) {
+        console.error("Environment variables not set and config.json not found!");
+        console.error("Please set DISCORD_TOKEN and TARGET_USER_ID environment variables.");
+        process.exit(1);
+    }
+}
 
 const client = new Client({ 
     intents: [

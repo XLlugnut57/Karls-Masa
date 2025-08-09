@@ -31,6 +31,7 @@ if (process.env.DISCORD_TOKEN && process.env.TARGET_USER_ID) {
 
 // Bot state
 let botEnabled = true;
+let disciplineMode = false;
 
 // Function to update bot status
 function updateBotStatus() {
@@ -55,14 +56,19 @@ async function checkTargetUserDeafened() {
             if (voiceState && voiceState.channel && voiceState.selfDeaf) {
                 console.log(`Found target user ${voiceState.member.user.tag} deafened in ${voiceState.channel.name} when bot was enabled`);
                 
-                // Kick them from the voice channel
-                voiceState.member.voice.disconnect('Auto-kicked for being deafened when bot was enabled')
-                    .then(() => {
-                        console.log(`Successfully kicked ${voiceState.member.user.tag} from voice channel (was deafened when enabled)`);
-                    })
-                    .catch(error => {
-                        console.error(`Failed to kick user: ${error.message}`);
-                    });
+                if (disciplineMode) {
+                    // Start discipline mode instead of kicking
+                    startDisciplineMode(voiceState);
+                } else {
+                    // Kick them from the voice channel
+                    voiceState.member.voice.disconnect('Auto-kicked for being deafened when bot was enabled')
+                        .then(() => {
+                            console.log(`Successfully kicked ${voiceState.member.user.tag} from voice channel (was deafened when enabled)`);
+                        })
+                        .catch(error => {
+                            console.error(`Failed to kick user: ${error.message}`);
+                        });
+                }
                 
                 return true; // Found and handled
             }
@@ -73,6 +79,68 @@ async function checkTargetUserDeafened() {
         console.error('Error checking target user voice state:', error);
         return false;
     }
+}
+
+// Function to find empty voice channels in a guild
+function findEmptyVoiceChannels(guild) {
+    return guild.channels.cache.filter(channel => 
+        channel.type === 2 && // Voice channel
+        channel.members.size === 0 && // Empty
+        channel.permissionsFor(guild.members.me).has('MoveMembers') // Bot has move permission
+    );
+}
+
+// Function to start discipline mode - rapidly move user between empty VCs
+async function startDisciplineMode(voiceState) {
+    const guild = voiceState.guild;
+    const member = voiceState.member;
+    const emptyChannels = findEmptyVoiceChannels(guild);
+    
+    if (emptyChannels.size === 0) {
+        console.log('No empty voice channels available for discipline mode, kicking instead');
+        member.voice.disconnect('Auto-kicked for deafening (no empty channels for discipline)')
+            .catch(error => console.error(`Failed to kick user: ${error.message}`));
+        return;
+    }
+    
+    console.log(`Starting discipline mode for ${member.user.tag} - found ${emptyChannels.size} empty channels`);
+    
+    const channelArray = Array.from(emptyChannels.values());
+    let moveCount = 0;
+    const maxMoves = 8; // Move them 8 times
+    const moveInterval = 1500; // 1.5 seconds between moves
+    
+    const disciplineInterval = setInterval(async () => {
+        try {
+            // Check if user is still in a voice channel and still deafened
+            if (!member.voice.channel || !member.voice.selfDeaf) {
+                console.log('User undeafened or left voice, stopping discipline');
+                clearInterval(disciplineInterval);
+                return;
+            }
+            
+            // Pick a random empty channel
+            const randomChannel = channelArray[Math.floor(Math.random() * channelArray.length)];
+            
+            await member.voice.setChannel(randomChannel, 'Discipline mode - user was deafened');
+            console.log(`Discipline move ${moveCount + 1}/${maxMoves}: Moved ${member.user.tag} to ${randomChannel.name}`);
+            
+            moveCount++;
+            
+            if (moveCount >= maxMoves) {
+                console.log('Discipline complete, kicking user');
+                clearInterval(disciplineInterval);
+                // After discipline, kick them
+                setTimeout(() => {
+                    member.voice.disconnect('Discipline complete - final kick for deafening')
+                        .catch(error => console.error(`Failed to kick user: ${error.message}`));
+                }, 1000);
+            }
+        } catch (error) {
+            console.error('Error during discipline mode:', error);
+            clearInterval(disciplineInterval);
+        }
+    }, moveInterval);
 }
 
 // Create HTTP server for Railway health checks
@@ -105,12 +173,13 @@ const commands = [
         .setDescription('Control the voice kick bot')
         .addStringOption(option =>
             option.setName('action')
-                .setDescription('Turn the bot on/off or check status')
+                .setDescription('Turn the bot on/off, check status, or enable discipline mode')
                 .setRequired(true)
                 .addChoices(
                     { name: 'on', value: 'on' },
                     { name: 'off', value: 'off' },
-                    { name: 'check', value: 'check' }
+                    { name: 'check', value: 'check' },
+                    { name: 'discipline', value: 'discipline' }
                 ))
 ];
 
@@ -202,13 +271,32 @@ client.on('interactionCreate', async interaction => {
             }
         } else if (action === 'check') {
             const status = botEnabled ? '**ENABLED** ✅' : '**DISABLED** 🛑';
+            const mode = disciplineMode ? '**DISCIPLINE** 🌪️' : '**KICK** 🦵';
             const targetUser = await client.users.fetch(targetUserId).catch(() => null);
             const targetName = targetUser ? `${targetUser.tag}` : `User ID: ${targetUserId}`;
             
             await interaction.reply({ 
-                content: `📊 **Bot Status:** ${status}\n👤 **Target User:** ${targetName}`
+                content: `📊 **Bot Status:** ${status}\n⚡ **Mode:** ${mode}\n👤 **Target User:** ${targetName}`
             });
             console.log(`Status checked by ${interaction.user.tag}`);
+        } else if (action === 'discipline') {
+            if (!botEnabled) {
+                await interaction.reply({ 
+                    content: '⚠️ Bot must be enabled first! Use `/wk on` then `/wk discipline`'
+                });
+            } else if (disciplineMode) {
+                disciplineMode = false;
+                await interaction.reply({ 
+                    content: '🦵 Discipline mode **DISABLED** - back to kicking mode'
+                });
+                console.log(`Discipline mode disabled by ${interaction.user.tag}`);
+            } else {
+                disciplineMode = true;
+                await interaction.reply({ 
+                    content: '🌪️ Discipline mode **ENABLED** - will move user between empty channels!'
+                });
+                console.log(`Discipline mode enabled by ${interaction.user.tag}`);
+            }
         }
     }
 });
@@ -228,14 +316,19 @@ client.on('voiceStateUpdate', (oldState, newState) => {
     if (!oldState.channel && newState.channel && newState.selfDeaf) {
         console.log(`Target user ${newState.member.user.tag} joined ${newState.channel.name} while already deafened`);
         
-        // Kick them from the voice channel
-        newState.member.voice.disconnect('Auto-kicked for joining while deafened')
-            .then(() => {
-                console.log(`Successfully kicked ${newState.member.user.tag} from voice channel (joined deafened)`);
-            })
-            .catch(error => {
-                console.error(`Failed to kick user: ${error.message}`);
-            });
+        if (disciplineMode) {
+            // Start discipline mode
+            startDisciplineMode(newState);
+        } else {
+            // Kick them from the voice channel
+            newState.member.voice.disconnect('Auto-kicked for joining while deafened')
+                .then(() => {
+                    console.log(`Successfully kicked ${newState.member.user.tag} from voice channel (joined deafened)`);
+                })
+                .catch(error => {
+                    console.error(`Failed to kick user: ${error.message}`);
+                });
+        }
         return;
     }
     
@@ -243,14 +336,19 @@ client.on('voiceStateUpdate', (oldState, newState) => {
     if (!oldState.selfDeaf && newState.selfDeaf) {
         console.log(`Target user ${newState.member.user.tag} has deafened themselves in ${newState.channel.name}`);
         
-        // Kick them from the voice channel
-        newState.member.voice.disconnect('Auto-kicked for deafening')
-            .then(() => {
-                console.log(`Successfully kicked ${newState.member.user.tag} from voice channel (deafened)`);
-            })
-            .catch(error => {
-                console.error(`Failed to kick user: ${error.message}`);
-            });
+        if (disciplineMode) {
+            // Start discipline mode
+            startDisciplineMode(newState);
+        } else {
+            // Kick them from the voice channel
+            newState.member.voice.disconnect('Auto-kicked for deafening')
+                .then(() => {
+                    console.log(`Successfully kicked ${newState.member.user.tag} from voice channel (deafened)`);
+                })
+                .catch(error => {
+                    console.error(`Failed to kick user: ${error.message}`);
+                });
+        }
     }
 });
 

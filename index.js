@@ -83,11 +83,23 @@ async function checkTargetUserDeafened() {
 
 // Function to find empty voice channels in a guild
 function findEmptyVoiceChannels(guild) {
-    return guild.channels.cache.filter(channel => 
-        channel.type === 2 && // Voice channel
-        channel.members.size === 0 && // Empty
-        channel.permissionsFor(guild.members.me).has('MoveMembers') // Bot has move permission
-    );
+    const botMember = guild.members.me;
+    if (!botMember) return new Map();
+    
+    return guild.channels.cache.filter(channel => {
+        // Must be a voice channel
+        if (channel.type !== 2) return false;
+        
+        // Must be empty (no members)
+        if (channel.members.size > 0) return false;
+        
+        // Bot must be able to connect to the channel
+        const permissions = channel.permissionsFor(botMember);
+        if (!permissions) return false;
+        
+        // Check for required permissions
+        return permissions.has(['Connect', 'MoveMembers', 'ViewChannel']);
+    });
 }
 
 // Function to start discipline mode - rapidly move user between empty VCs
@@ -104,11 +116,12 @@ async function startDisciplineMode(voiceState) {
     }
     
     console.log(`Starting discipline mode for ${member.user.tag} - found ${emptyChannels.size} empty channels`);
+    console.log(`Available channels: ${Array.from(emptyChannels.values()).map(c => c.name).join(', ')}`);
     
     const channelArray = Array.from(emptyChannels.values());
     let moveCount = 0;
     const maxMoves = 8; // Move them 8 times
-    const moveInterval = 750; // 1.5 seconds between moves
+    const moveInterval = 750; // 0.75 seconds between moves
     
     const disciplineInterval = setInterval(async () => {
         try {
@@ -119,8 +132,32 @@ async function startDisciplineMode(voiceState) {
                 return;
             }
             
-            // Pick a random empty channel
-            const randomChannel = channelArray[Math.floor(Math.random() * channelArray.length)];
+            // Re-check if channels are still empty and valid
+            const validChannels = channelArray.filter(channel => {
+                const currentChannel = guild.channels.cache.get(channel.id);
+                return currentChannel && 
+                       currentChannel.members.size === 0 && 
+                       currentChannel.permissionsFor(guild.members.me)?.has(['Connect', 'MoveMembers', 'ViewChannel']);
+            });
+            
+            if (validChannels.length === 0) {
+                console.log('No valid channels available, ending discipline and kicking');
+                clearInterval(disciplineInterval);
+                member.voice.disconnect('Discipline ended - no valid channels available')
+                    .catch(error => console.error(`Failed to kick user: ${error.message}`));
+                return;
+            }
+            
+            // Pick a random valid channel
+            const randomChannel = validChannels[Math.floor(Math.random() * validChannels.length)];
+            
+            // Double-check permissions before attempting move
+            const permissions = randomChannel.permissionsFor(guild.members.me);
+            if (!permissions?.has(['Connect', 'MoveMembers', 'ViewChannel'])) {
+                console.log(`Missing permissions for ${randomChannel.name}, trying next move`);
+                moveCount++;
+                return;
+            }
             
             await member.voice.setChannel(randomChannel, 'Discipline mode - user was deafened');
             console.log(`Discipline move ${moveCount + 1}/${maxMoves}: Moved ${member.user.tag} to ${randomChannel.name}`);
@@ -134,11 +171,23 @@ async function startDisciplineMode(voiceState) {
                 setTimeout(() => {
                     member.voice.disconnect('Discipline complete - final kick for deafening')
                         .catch(error => console.error(`Failed to kick user: ${error.message}`));
-                }, 1000);
+                }, 500);
             }
         } catch (error) {
             console.error('Error during discipline mode:', error);
-            clearInterval(disciplineInterval);
+            console.log('Error details:', {
+                channelId: error.requestBody?.json?.channel_id,
+                code: error.code,
+                message: error.message
+            });
+            
+            // If it's a permission error, fall back to kicking
+            if (error.code === 50013) {
+                console.log('Permission error - falling back to kick');
+                clearInterval(disciplineInterval);
+                member.voice.disconnect('Auto-kicked due to permission error during discipline')
+                    .catch(kickError => console.error(`Failed to kick user: ${kickError.message}`));
+            }
         }
     }, moveInterval);
 }

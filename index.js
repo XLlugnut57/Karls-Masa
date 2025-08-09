@@ -108,7 +108,7 @@ async function startDisciplineMode(voiceState) {
     const channelArray = Array.from(emptyChannels.values());
     let moveCount = 0;
     const maxMoves = 8; // Move them 8 times
-    const moveInterval = 1500; // 1.5 seconds between moves
+    const moveInterval = 750; // 1.5 seconds between moves
     
     const disciplineInterval = setInterval(async () => {
         try {

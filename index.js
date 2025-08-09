@@ -106,6 +106,7 @@ function findEmptyVoiceChannels(guild) {
 async function startDisciplineMode(voiceState) {
     const guild = voiceState.guild;
     const member = voiceState.member;
+    const originalChannel = voiceState.channel; // Remember where they deafened
     const emptyChannels = findEmptyVoiceChannels(guild);
     
     if (emptyChannels.size === 0) {
@@ -115,20 +116,36 @@ async function startDisciplineMode(voiceState) {
         return;
     }
     
-    console.log(`Starting discipline mode for ${member.user.tag} - found ${emptyChannels.size} empty channels`);
+    console.log(`Starting infinite discipline mode for ${member.user.tag} - found ${emptyChannels.size} empty channels`);
+    console.log(`Original channel: ${originalChannel.name} - will return here when undeafened`);
     console.log(`Available channels: ${Array.from(emptyChannels.values()).map(c => c.name).join(', ')}`);
     
     const channelArray = Array.from(emptyChannels.values());
     let moveCount = 0;
-    const maxMoves = 8; // Move them 8 times
     const moveInterval = 750; // 0.75 seconds between moves
     
     const disciplineInterval = setInterval(async () => {
         try {
-            // Check if user is still in a voice channel and still deafened
-            if (!member.voice.channel || !member.voice.selfDeaf) {
-                console.log('User undeafened or left voice, stopping discipline');
+            // Check if user left voice entirely
+            if (!member.voice.channel) {
+                console.log('User left voice entirely, stopping discipline');
                 clearInterval(disciplineInterval);
+                return;
+            }
+            
+            // Check if user undeafened - if so, move them back and stop
+            if (!member.voice.selfDeaf) {
+                console.log(`User undeafened! Moving ${member.user.tag} back to ${originalChannel.name}`);
+                clearInterval(disciplineInterval);
+                
+                // Move them back to original channel
+                try {
+                    await member.voice.setChannel(originalChannel, 'Returned to original channel after undeafening');
+                    console.log(`Successfully returned ${member.user.tag} to ${originalChannel.name}`);
+                } catch (error) {
+                    console.error(`Failed to return user to original channel: ${error.message}`);
+                    // If we can't move them back, just leave them where they are
+                }
                 return;
             }
             
@@ -155,24 +172,13 @@ async function startDisciplineMode(voiceState) {
             const permissions = randomChannel.permissionsFor(guild.members.me);
             if (!permissions?.has(['Connect', 'MoveMembers', 'ViewChannel'])) {
                 console.log(`Missing permissions for ${randomChannel.name}, trying next move`);
-                moveCount++;
                 return;
             }
             
             await member.voice.setChannel(randomChannel, 'Discipline mode - user was deafened');
-            console.log(`Discipline move ${moveCount + 1}/${maxMoves}: Moved ${member.user.tag} to ${randomChannel.name}`);
-            
             moveCount++;
+            console.log(`Discipline move ${moveCount}: Moved ${member.user.tag} to ${randomChannel.name}`);
             
-            if (moveCount >= maxMoves) {
-                console.log('Discipline complete, kicking user');
-                clearInterval(disciplineInterval);
-                // After discipline, kick them
-                setTimeout(() => {
-                    member.voice.disconnect('Discipline complete - final kick for deafening')
-                        .catch(error => console.error(`Failed to kick user: ${error.message}`));
-                }, 500);
-            }
         } catch (error) {
             console.error('Error during discipline mode:', error);
             console.log('Error details:', {

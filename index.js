@@ -152,16 +152,11 @@ async function startDisciplineMode(voiceState) {
                 return;
             }
             
-            // Re-check if channels are still empty and valid, excluding current channel
-            const validChannels = channelArray.filter(channel => {
-                const currentChannel = guild.channels.cache.get(channel.id);
-                return currentChannel && 
-                       currentChannel.id !== member.voice.channel?.id && // Don't include their current channel
-                       currentChannel.members.size === 0 && 
-                       currentChannel.permissionsFor(guild.members.me)?.has(['Connect', 'MoveMembers', 'ViewChannel']);
-            });
+            // Get fresh list of empty channels, excluding their current one
+            const currentChannelId = member.voice.channel?.id;
+            const freshEmptyChannels = findEmptyVoiceChannels(guild, currentChannelId);
             
-            if (validChannels.length === 0) {
+            if (freshEmptyChannels.size === 0) {
                 console.log('No valid channels available (all occupied or current channel), ending discipline and kicking');
                 clearInterval(disciplineInterval);
                 member.voice.disconnect('Discipline ended - no valid channels available')
@@ -169,8 +164,16 @@ async function startDisciplineMode(voiceState) {
                 return;
             }
             
-            // Pick a random valid channel (different from current)
-            const randomChannel = validChannels[Math.floor(Math.random() * validChannels.length)];
+            // Convert to array and pick random channel
+            const freshChannelArray = Array.from(freshEmptyChannels.values());
+            const randomChannel = freshChannelArray[Math.floor(Math.random() * freshChannelArray.length)];
+            
+            // Double-check this isn't their current channel (should be impossible now)
+            if (randomChannel.id === currentChannelId) {
+                console.log(`Somehow picked current channel ${randomChannel.name}, skipping move`);
+                return;
+            }
+            
             console.log(`Current: ${member.voice.channel?.name}, Moving to: ${randomChannel.name}`);
             
             // Double-check permissions before attempting move

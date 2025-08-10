@@ -81,14 +81,17 @@ async function checkTargetUserDeafened() {
     }
 }
 
-// Function to find empty voice channels in a guild
-function findEmptyVoiceChannels(guild) {
+// Function to find empty voice channels in a guild, excluding a specific channel
+function findEmptyVoiceChannels(guild, excludeChannelId = null) {
     const botMember = guild.members.me;
     if (!botMember) return new Map();
     
     return guild.channels.cache.filter(channel => {
         // Must be a voice channel
         if (channel.type !== 2) return false;
+        
+        // Don't include the excluded channel (usually current channel)
+        if (excludeChannelId && channel.id === excludeChannelId) return false;
         
         // Must be empty (no members)
         if (channel.members.size > 0) return false;
@@ -107,10 +110,10 @@ async function startDisciplineMode(voiceState) {
     const guild = voiceState.guild;
     const member = voiceState.member;
     const originalChannel = voiceState.channel; // Remember where they deafened
-    const emptyChannels = findEmptyVoiceChannels(guild);
+    const emptyChannels = findEmptyVoiceChannels(guild, originalChannel.id); // Exclude their current channel
     
     if (emptyChannels.size === 0) {
-        console.log('No empty voice channels available for discipline mode, kicking instead');
+        console.log('No empty voice channels available for discipline mode (excluding current), kicking instead');
         member.voice.disconnect('Auto-kicked for deafening (no empty channels for discipline)')
             .catch(error => console.error(`Failed to kick user: ${error.message}`));
         return;
@@ -149,24 +152,26 @@ async function startDisciplineMode(voiceState) {
                 return;
             }
             
-            // Re-check if channels are still empty and valid
+            // Re-check if channels are still empty and valid, excluding current channel
             const validChannels = channelArray.filter(channel => {
                 const currentChannel = guild.channels.cache.get(channel.id);
                 return currentChannel && 
+                       currentChannel.id !== member.voice.channel?.id && // Don't include their current channel
                        currentChannel.members.size === 0 && 
                        currentChannel.permissionsFor(guild.members.me)?.has(['Connect', 'MoveMembers', 'ViewChannel']);
             });
             
             if (validChannels.length === 0) {
-                console.log('No valid channels available, ending discipline and kicking');
+                console.log('No valid channels available (all occupied or current channel), ending discipline and kicking');
                 clearInterval(disciplineInterval);
                 member.voice.disconnect('Discipline ended - no valid channels available')
                     .catch(error => console.error(`Failed to kick user: ${error.message}`));
                 return;
             }
             
-            // Pick a random valid channel
+            // Pick a random valid channel (different from current)
             const randomChannel = validChannels[Math.floor(Math.random() * validChannels.length)];
+            console.log(`Current: ${member.voice.channel?.name}, Moving to: ${randomChannel.name}`);
             
             // Double-check permissions before attempting move
             const permissions = randomChannel.permissionsFor(guild.members.me);
@@ -177,7 +182,7 @@ async function startDisciplineMode(voiceState) {
             
             await member.voice.setChannel(randomChannel, 'Discipline mode - user was deafened');
             moveCount++;
-            console.log(`Discipline move ${moveCount}: Moved ${member.user.tag} to ${randomChannel.name}`);
+            console.log(`Discipline move ${moveCount}: Successfully moved ${member.user.tag} to ${randomChannel.name}`);
             
         } catch (error) {
             console.error('Error during discipline mode:', error);

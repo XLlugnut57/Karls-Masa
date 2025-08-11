@@ -191,9 +191,29 @@ async function startDisciplineMode(voiceState) {
                 return;
             }
             
+            // Double-check channel is still empty right before move
+            await randomChannel.fetch(); // Refresh channel data
+            if (randomChannel.members.size > 0) {
+                console.log(`Channel ${randomChannel.name} is no longer empty (${randomChannel.members.size} members), trying next move`);
+                return;
+            }
+            
+            // Store current position before move to verify success
+            const beforeChannelId = member.voice.channelId;
+            
             await member.voice.setChannel(randomChannel, 'Discipline mode - user was deafened');
-            moveCount++;
-            console.log(`Discipline move ${moveCount}: Successfully moved ${member.user.tag} to ${randomChannel.name}`);
+            
+            // Verify the move actually worked by checking their new position
+            await new Promise(resolve => setTimeout(resolve, 100)); // Small delay for Discord to update
+            const afterChannelId = member.voice.channelId;
+            
+            if (afterChannelId === randomChannel.id) {
+                moveCount++;
+                console.log(`Discipline move ${moveCount}: Successfully moved ${member.user.tag} to ${randomChannel.name}`);
+            } else {
+                console.log(`Move failed: ${member.user.tag} is still in ${member.voice.channel?.name} instead of ${randomChannel.name}`);
+                console.log(`Before: ${beforeChannelId}, Target: ${randomChannel.id}, After: ${afterChannelId}`);
+            }
             
         } catch (error) {
             console.error('Error during discipline mode:', error);

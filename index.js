@@ -129,9 +129,17 @@ async function startDisciplineMode(voiceState) {
     
     const disciplineInterval = setInterval(async () => {
         try {
-            // Check if user left voice entirely
-            if (!member.voice.channel) {
+            // Check if user left voice entirely (multiple ways to verify)
+            if (!member.voice || !member.voice.channel || !member.voice.channelId) {
                 console.log('User left voice entirely, stopping discipline');
+                clearInterval(disciplineInterval);
+                return;
+            }
+            
+            // Double-check user is still in a voice channel by fetching fresh voice state
+            const freshVoiceState = member.guild.voiceStates.cache.get(member.id);
+            if (!freshVoiceState || !freshVoiceState.channel) {
+                console.log('User no longer in voice (fresh check), stopping discipline');
                 clearInterval(disciplineInterval);
                 return;
             }
@@ -195,12 +203,19 @@ async function startDisciplineMode(voiceState) {
                 message: error.message
             });
             
-            // If it's a permission error, fall back to kicking
+            // Handle specific Discord API errors
             if (error.code === 50013) {
                 console.log('Permission error - falling back to kick');
                 clearInterval(disciplineInterval);
                 member.voice.disconnect('Auto-kicked due to permission error during discipline')
                     .catch(kickError => console.error(`Failed to kick user: ${kickError.message}`));
+            } else if (error.code === 40032) {
+                console.log('Target user is not connected to voice - stopping discipline');
+                clearInterval(disciplineInterval);
+                // No need to kick since they're already gone
+            } else {
+                console.log('Unknown error during discipline - stopping');
+                clearInterval(disciplineInterval);
             }
         }
     }, moveInterval);

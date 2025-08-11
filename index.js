@@ -127,31 +127,40 @@ async function startDisciplineMode(voiceState) {
     let moveCount = 0;
     let moveInterval = 750; // Start at 0.75 seconds between moves
     let rateLimitHits = 0;
-    
     let disciplineInterval;
+    let isRunning = true; // Flag to prevent multiple intervals
+    
+    const stopDiscipline = (reason) => {
+        if (disciplineInterval) {
+            clearInterval(disciplineInterval);
+            disciplineInterval = null;
+        }
+        isRunning = false;
+        console.log(`Discipline stopped: ${reason}`);
+    };
     
     const runDiscipline = () => {
+        if (!isRunning) return; // Don't start if already stopped
+        
         disciplineInterval = setInterval(async () => {
             try {
                 // Check if user left voice entirely (multiple ways to verify)
                 if (!member.voice || !member.voice.channel || !member.voice.channelId) {
-                    console.log('User left voice entirely, stopping discipline');
-                    clearInterval(disciplineInterval);
+                    stopDiscipline('User left voice entirely');
                     return;
                 }
                 
                 // Double-check user is still in a voice channel by fetching fresh voice state
                 const freshVoiceState = member.guild.voiceStates.cache.get(member.id);
                 if (!freshVoiceState || !freshVoiceState.channel) {
-                    console.log('User no longer in voice (fresh check), stopping discipline');
-                    clearInterval(disciplineInterval);
+                    stopDiscipline('User no longer in voice (fresh check)');
                     return;
                 }
                 
                 // Check if user undeafened - if so, move them back and stop
                 if (!member.voice.selfDeaf) {
                     console.log(`User undeafened! Moving ${member.user.tag} back to ${originalChannel.name}`);
-                    clearInterval(disciplineInterval);
+                    stopDiscipline('User undeafened');
                     
                     // Move them back to original channel
                     try {
@@ -170,7 +179,7 @@ async function startDisciplineMode(voiceState) {
                 
                 if (freshEmptyChannels.size === 0) {
                     console.log('No valid channels available (all occupied or current channel), ending discipline and kicking');
-                    clearInterval(disciplineInterval);
+                    stopDiscipline('No valid channels available');
                     member.voice.disconnect('Discipline ended - no valid channels available')
                         .catch(error => console.error(`Failed to kick user: ${error.message}`));
                     return;
@@ -231,12 +240,12 @@ async function startDisciplineMode(voiceState) {
                 // Handle specific Discord API errors
                 if (error.code === 50013) {
                     console.log('Permission error - falling back to kick');
-                    clearInterval(disciplineInterval);
+                    stopDiscipline('Permission error');
                     member.voice.disconnect('Auto-kicked due to permission error during discipline')
                         .catch(kickError => console.error(`Failed to kick user: ${kickError.message}`));
                 } else if (error.code === 40032) {
                     console.log('Target user is not connected to voice - stopping discipline');
-                    clearInterval(disciplineInterval);
+                    stopDiscipline('Target user not connected to voice');
                     // No need to kick since they're already gone
                 } else if (error.status === 429) {
                     // Rate limited - increase interval and restart with slower timing
@@ -244,10 +253,12 @@ async function startDisciplineMode(voiceState) {
                     moveInterval = Math.min(moveInterval * 1.5, 5000); // Increase up to 5 seconds max
                     console.log(`Hit rate limit (${rateLimitHits} times) - slowing down to ${moveInterval}ms interval`);
                     clearInterval(disciplineInterval);
-                    setTimeout(runDiscipline, 1000); // Wait 1 second then restart with new interval
+                    setTimeout(() => {
+                        if (isRunning) runDiscipline(); // Only restart if still running
+                    }, 1000); // Wait 1 second then restart with new interval
                 } else {
                     console.log('Unknown error during discipline - stopping');
-                    clearInterval(disciplineInterval);
+                    stopDiscipline('Unknown error');
                 }
             }
         }, moveInterval);

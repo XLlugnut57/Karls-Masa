@@ -129,6 +129,7 @@ async function startDisciplineMode(voiceState) {
     let rateLimitHits = 0;
     let disciplineInterval;
     let isRunning = true; // Flag to prevent multiple intervals
+    let movingUser = false; // Flag to prevent multiple simultaneous moves
     
     const stopDiscipline = (reason) => {
         if (disciplineInterval) {
@@ -136,6 +137,7 @@ async function startDisciplineMode(voiceState) {
             disciplineInterval = null;
         }
         isRunning = false;
+        movingUser = false; // Reset moving flag when stopping
         console.log(`Discipline stopped: ${reason}`);
     };
     
@@ -197,10 +199,20 @@ async function startDisciplineMode(voiceState) {
                 
                 console.log(`Current: ${member.voice.channel?.name}, Moving to: ${randomChannel.name} (interval: ${moveInterval}ms)`);
                 
+                // Check if a move is already in progress
+                if (movingUser) {
+                    console.log('Move already in progress, skipping this interval');
+                    return;
+                }
+                
+                // Set flag to prevent concurrent moves
+                movingUser = true;
+                
                 // Double-check permissions before attempting move
                 const permissions = randomChannel.permissionsFor(guild.members.me);
                 if (!permissions?.has(['Connect', 'MoveMembers', 'ViewChannel'])) {
                     console.log(`Missing permissions for ${randomChannel.name}, trying next move`);
+                    movingUser = false; // Reset flag
                     return;
                 }
                 
@@ -208,6 +220,7 @@ async function startDisciplineMode(voiceState) {
                 await randomChannel.fetch(); // Refresh channel data
                 if (randomChannel.members.size > 0) {
                     console.log(`Channel ${randomChannel.name} is no longer empty (${randomChannel.members.size} members), trying next move`);
+                    movingUser = false; // Reset flag
                     return;
                 }
                 
@@ -220,6 +233,9 @@ async function startDisciplineMode(voiceState) {
                 await new Promise(resolve => setTimeout(resolve, 100)); // Small delay for Discord to update
                 const afterChannelId = member.voice.channelId;
                 
+                // Reset moving flag after move completes
+                movingUser = false;
+                
                 if (afterChannelId === randomChannel.id) {
                     moveCount++;
                     rateLimitHits = Math.max(0, rateLimitHits - 1); // Reduce rate limit counter on success
@@ -230,6 +246,9 @@ async function startDisciplineMode(voiceState) {
                 }
                 
             } catch (error) {
+                // Reset moving flag on any error
+                movingUser = false;
+                
                 console.error('Error during discipline mode:', error);
                 console.log('Error details:', {
                     channelId: error.requestBody?.json?.channel_id,

@@ -504,9 +504,20 @@ client.on('interactionCreate', async interaction => {
             speechCount = 0;
             speechMonitoringEnabled = true;
 
-            await interaction.reply({ 
-                content: `🎤 **Speech monitoring STARTED**\n👤 **Target:** ${targetUser.tag}\n📊 **Limit:** ${speechLimit} times\n🔢 **Current count:** 0`
-            });
+            // Check if target is already in a voice channel
+            const targetMember = interaction.guild.members.cache.get(targetUser.id);
+            if (targetMember && targetMember.voice.channel) {
+                console.log(`🎯 Target ${targetUser.tag} is already in ${targetMember.voice.channel.name} - joining now`);
+                joinVoiceChannelForMonitoring(targetMember.voice.channel);
+                
+                await interaction.reply({ 
+                    content: `🎤 **Speech monitoring STARTED**\n👤 **Target:** ${targetUser.tag}\n📊 **Limit:** ${speechLimit} times\n🔢 **Current count:** 0\n🔊 **Bot joined:** ${targetMember.voice.channel.name}`
+                });
+            } else {
+                await interaction.reply({ 
+                    content: `🎤 **Speech monitoring STARTED**\n👤 **Target:** ${targetUser.tag}\n📊 **Limit:** ${speechLimit} times\n🔢 **Current count:** 0\n⏳ **Waiting for target to join voice...**`
+                });
+            }
             console.log(`Speech monitoring started for ${targetUser.tag} with limit ${speechLimit} by ${interaction.user.tag}`);
 
         } else if (action === 'stop') {
@@ -567,7 +578,16 @@ client.on('voiceStateUpdate', (oldState, newState) => {
 
 // Function to join voice channel for monitoring
 function joinVoiceChannelForMonitoring(channel) {
+    console.log(`🔄 Attempting to join voice channel: ${channel.name} (ID: ${channel.id})`);
+    
     try {
+        // Check if bot has permissions
+        const permissions = channel.permissionsFor(channel.guild.members.me);
+        if (!permissions.has(['ViewChannel', 'Connect'])) {
+            console.error(`❌ Missing permissions to join ${channel.name}`);
+            return;
+        }
+
         const connection = joinVoiceChannel({
             channelId: channel.id,
             guildId: channel.guild.id,
@@ -577,9 +597,10 @@ function joinVoiceChannelForMonitoring(channel) {
         });
 
         voiceConnections.set(channel.guild.id, connection);
+        console.log(`🔗 Voice connection created for ${channel.name}`);
 
         connection.on(VoiceConnectionStatus.Ready, () => {
-            console.log(`✅ Bot joined ${channel.name} for speaking detection`);
+            console.log(`✅ Bot successfully joined ${channel.name} for speaking detection`);
             setupSpeakingDetection(connection, channel);
         });
 
@@ -588,8 +609,14 @@ function joinVoiceChannelForMonitoring(channel) {
             voiceConnections.delete(channel.guild.id);
         });
 
+        connection.on(VoiceConnectionStatus.Destroyed, () => {
+            console.log(`🗑️ Voice connection destroyed for ${channel.name}`);
+            voiceConnections.delete(channel.guild.id);
+        });
+
     } catch (error) {
-        console.error(`Failed to join voice channel: ${error.message}`);
+        console.error(`❌ Failed to join voice channel ${channel.name}: ${error.message}`);
+        console.error('Error details:', error);
     }
 }
 

@@ -33,6 +33,16 @@ if (process.env.DISCORD_TOKEN && process.env.TARGET_USER_ID) {
 let botEnabled = true;
 let disciplineMode = false;
 
+// Speaking tracking
+let speakingCounts = new Map(); // userId -> count
+let currentlySpeaking = new Set(); // Track who is currently speaking
+
+// Speech monitoring module
+let speechMonitoringEnabled = false;
+let speechTargetUserId = null; // Separate target for speech monitoring
+let speechLimit = 10; // Default limit for testing
+let speechCount = 0; // Current count for the speech target
+
 // Function to update bot status
 function updateBotStatus() {
     if (botEnabled) {
@@ -129,7 +139,6 @@ async function startDisciplineMode(voiceState) {
     let rateLimitHits = 0;
     let disciplineInterval;
     let isRunning = true; // Flag to prevent multiple intervals
-    let movingUser = false; // Flag to prevent multiple simultaneous moves
     
     const stopDiscipline = (reason) => {
         if (disciplineInterval) {
@@ -137,7 +146,6 @@ async function startDisciplineMode(voiceState) {
             disciplineInterval = null;
         }
         isRunning = false;
-        movingUser = false; // Reset moving flag when stopping
         console.log(`Discipline stopped: ${reason}`);
     };
     
@@ -199,20 +207,10 @@ async function startDisciplineMode(voiceState) {
                 
                 console.log(`Current: ${member.voice.channel?.name}, Moving to: ${randomChannel.name} (interval: ${moveInterval}ms)`);
                 
-                // Check if a move is already in progress
-                if (movingUser) {
-                    console.log('Move already in progress, skipping this interval');
-                    return;
-                }
-                
-                // Set flag to prevent concurrent moves
-                movingUser = true;
-                
                 // Double-check permissions before attempting move
                 const permissions = randomChannel.permissionsFor(guild.members.me);
                 if (!permissions?.has(['Connect', 'MoveMembers', 'ViewChannel'])) {
                     console.log(`Missing permissions for ${randomChannel.name}, trying next move`);
-                    movingUser = false; // Reset flag
                     return;
                 }
                 
@@ -220,7 +218,6 @@ async function startDisciplineMode(voiceState) {
                 await randomChannel.fetch(); // Refresh channel data
                 if (randomChannel.members.size > 0) {
                     console.log(`Channel ${randomChannel.name} is no longer empty (${randomChannel.members.size} members), trying next move`);
-                    movingUser = false; // Reset flag
                     return;
                 }
                 
@@ -233,9 +230,6 @@ async function startDisciplineMode(voiceState) {
                 await new Promise(resolve => setTimeout(resolve, 100)); // Small delay for Discord to update
                 const afterChannelId = member.voice.channelId;
                 
-                // Reset moving flag after move completes
-                movingUser = false;
-                
                 if (afterChannelId === randomChannel.id) {
                     moveCount++;
                     rateLimitHits = Math.max(0, rateLimitHits - 1); // Reduce rate limit counter on success
@@ -246,9 +240,6 @@ async function startDisciplineMode(voiceState) {
                 }
                 
             } catch (error) {
-                // Reset moving flag on any error
-                movingUser = false;
-                
                 console.error('Error during discipline mode:', error);
                 console.log('Error details:', {
                     channelId: error.requestBody?.json?.channel_id,
@@ -323,8 +314,32 @@ const commands = [
                     { name: 'on', value: 'on' },
                     { name: 'off', value: 'off' },
                     { name: 'check', value: 'check' },
-                    { name: 'discipline', value: 'discipline' }
+                    { name: 'discipline', value: 'discipline' },
+                    { name: 'speaking', value: 'speaking' }
+                )),
+    new SlashCommandBuilder()
+        .setName('speech')
+        .setDescription('Control speech monitoring and timeout system')
+        .addStringOption(option =>
+            option.setName('action')
+                .setDescription('Control speech monitoring')
+                .setRequired(true)
+                .addChoices(
+                    { name: 'start', value: 'start' },
+                    { name: 'stop', value: 'stop' },
+                    { name: 'status', value: 'status' },
+                    { name: 'reset', value: 'reset' }
                 ))
+        .addUserOption(option =>
+            option.setName('target')
+                .setDescription('User to monitor (required for start action)')
+                .setRequired(false))
+        .addIntegerOption(option =>
+            option.setName('limit')
+                .setDescription('Speaking limit before timeout (default: 10)')
+                .setRequired(false)
+                .setMinValue(1)
+                .setMaxValue(100))
 ];
 
 // Bot ready event
@@ -441,6 +456,129 @@ client.on('interactionCreate', async interaction => {
                 });
                 console.log(`Discipline mode enabled by ${interaction.user.tag}`);
             }
+        } else if (action === 'speaking') {
+            // Show speaking counts for all users
+            if (speakingCounts.size === 0) {
+                await interaction.reply({ 
+                    content: '🎤 No speaking activity recorded yet!'
+                });
+            } else {
+                let response = '🎤 **Speaking Activity:**\n';
+                
+                // Sort by speaking count (highest first)
+                const sortedCounts = Array.from(speakingCounts.entries())
+                    .sort((a, b) => b[1] - a[1]);
+                
+                for (const [userId, count] of sortedCounts.slice(0, 10)) { // Show top 10
+                    const user = await client.users.fetch(userId).catch(() => null);
+                    const userName = user ? user.tag : `User ID: ${userId}`;
+                    const isSpeaking = currentlySpeaking.has(userId) ? ' 🎤' : '';
+                    response += `• ${userName}: **${count}** times${isSpeaking}\n`;
+                }
+                
+                if (sortedCounts.length > 10) {
+                    response += `\n... and ${sortedCounts.length - 10} more users`;
+                }
+                
+                await interaction.reply({ content: response });
+            }
+            console.log(`Speaking stats checked by ${interaction.user.tag}`);
+        }
+    } else if (interaction.commandName === 'speech') {
+        const action = interaction.options.getString('action');
+        const targetUser = interaction.options.getUser('target');
+        const limit = interaction.options.getInteger('limit');
+
+        if (action === 'start') {
+            if (!targetUser) {
+                await interaction.reply({ 
+                    content: '⚠️ You must specify a target user with `/speech start target:@user`'
+                });
+                return;
+            }
+
+            speechTargetUserId = targetUser.id;
+            speechLimit = limit || 10;
+            speechCount = 0;
+            speechMonitoringEnabled = true;
+
+            await interaction.reply({ 
+                content: `🎤 **Speech monitoring STARTED**\n👤 **Target:** ${targetUser.tag}\n📊 **Limit:** ${speechLimit} times\n🔢 **Current count:** 0`
+            });
+            console.log(`Speech monitoring started for ${targetUser.tag} with limit ${speechLimit} by ${interaction.user.tag}`);
+
+        } else if (action === 'stop') {
+            speechMonitoringEnabled = false;
+            await interaction.reply({ 
+                content: '🔇 **Speech monitoring STOPPED**'
+            });
+            console.log(`Speech monitoring stopped by ${interaction.user.tag}`);
+
+        } else if (action === 'status') {
+            if (!speechMonitoringEnabled) {
+                await interaction.reply({ 
+                    content: '🔇 Speech monitoring is **DISABLED**'
+                });
+            } else {
+                const targetUser = await client.users.fetch(speechTargetUserId).catch(() => null);
+                const targetName = targetUser ? targetUser.tag : `User ID: ${speechTargetUserId}`;
+                const remaining = Math.max(0, speechLimit - speechCount);
+                
+                await interaction.reply({ 
+                    content: `🎤 **Speech monitoring ACTIVE**\n👤 **Target:** ${targetName}\n📊 **Count:** ${speechCount}/${speechLimit}\n⏳ **Remaining:** ${remaining} times`
+                });
+            }
+
+        } else if (action === 'reset') {
+            speechCount = 0;
+            await interaction.reply({ 
+                content: `🔄 **Speech count RESET** to 0/${speechLimit}`
+            });
+            console.log(`Speech count reset by ${interaction.user.tag}`);
+        }
+    }
+});
+
+// Speaking detection event - tracks when users start/stop speaking
+client.on('voiceStateUpdate', (oldState, newState) => {
+    // Track speaking changes for any user (not just target)
+    if (oldState.speaking !== newState.speaking) {
+        const userId = newState.member.id;
+        const userName = newState.member.user.tag;
+        
+        if (newState.speaking && !currentlySpeaking.has(userId)) {
+            // User started speaking
+            currentlySpeaking.add(userId);
+            const currentCount = speakingCounts.get(userId) || 0;
+            speakingCounts.set(userId, currentCount + 1);
+            console.log(`🎤 ${userName} started speaking (count: ${currentCount + 1})`);
+            
+            // Check speech monitoring for specific target
+            if (speechMonitoringEnabled && userId === speechTargetUserId) {
+                speechCount++;
+                console.log(`📊 Speech target ${userName} spoke: ${speechCount}/${speechLimit}`);
+                
+                if (speechCount >= speechLimit) {
+                    // Timeout the user
+                    console.log(`🚫 ${userName} reached speech limit (${speechLimit}) - timing out!`);
+                    
+                    const member = newState.member;
+                    if (member.voice && member.voice.channel) {
+                        member.timeout(5 * 60 * 1000, `Exceeded speech limit (${speechLimit} times)`) // 5 minute timeout
+                            .then(() => {
+                                console.log(`✅ Successfully timed out ${userName} for 5 minutes`);
+                                speechMonitoringEnabled = false; // Auto-disable after timeout
+                            })
+                            .catch(error => {
+                                console.error(`❌ Failed to timeout ${userName}: ${error.message}`);
+                            });
+                    }
+                }
+            }
+        } else if (!newState.speaking && currentlySpeaking.has(userId)) {
+            // User stopped speaking
+            currentlySpeaking.delete(userId);
+            console.log(`🔇 ${userName} stopped speaking`);
         }
     }
 });

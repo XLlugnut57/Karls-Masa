@@ -1,4 +1,5 @@
 const {Client, GatewayIntentBits, SlashCommandBuilder, REST, Routes, ActivityType} = require("discord.js");
+const { joinVoiceChannel, VoiceConnectionStatus, createAudioReceiver } = require('@discordjs/voice');
 const http = require('http');
 
 // Use environment variables in production, fallback to config.json for local development
@@ -42,6 +43,7 @@ let speechMonitoringEnabled = false;
 let speechTargetUserId = null; // Separate target for speech monitoring
 let speechLimit = 10; // Default limit for testing
 let speechCount = 0; // Current count for the speech target
+let voiceConnections = new Map(); // Track voice connections for speaking detection
 
 // Function to update bot status
 function updateBotStatus() {
@@ -540,48 +542,112 @@ client.on('interactionCreate', async interaction => {
 });
 
 // Speaking detection event - tracks when users start/stop speaking
+// For proper speaking detection, the bot needs to join voice channels
 client.on('voiceStateUpdate', (oldState, newState) => {
-    // Track speaking changes for any user (not just target)
-    if (oldState.speaking !== newState.speaking) {
-        const userId = newState.member.id;
-        const userName = newState.member.user.tag;
+    // Handle speech monitoring target joining/leaving voice
+    if (speechMonitoringEnabled && (newState.member?.id === speechTargetUserId || oldState.member?.id === speechTargetUserId)) {
+        const member = newState.member || oldState.member;
         
-        if (newState.speaking && !currentlySpeaking.has(userId)) {
-            // User started speaking
-            currentlySpeaking.add(userId);
-            const currentCount = speakingCounts.get(userId) || 0;
-            speakingCounts.set(userId, currentCount + 1);
-            console.log(`🎤 ${userName} started speaking (count: ${currentCount + 1})`);
-            
-            // Check speech monitoring for specific target
-            if (speechMonitoringEnabled && userId === speechTargetUserId) {
-                speechCount++;
-                console.log(`📊 Speech target ${userName} spoke: ${speechCount}/${speechLimit}`);
-                
-                if (speechCount >= speechLimit) {
-                    // Timeout the user
-                    console.log(`🚫 ${userName} reached speech limit (${speechLimit}) - timing out!`);
-                    
-                    const member = newState.member;
-                    if (member.voice && member.voice.channel) {
-                        member.timeout(5 * 60 * 1000, `Exceeded speech limit (${speechLimit} times)`) // 5 minute timeout
-                            .then(() => {
-                                console.log(`✅ Successfully timed out ${userName} for 5 minutes`);
-                                speechMonitoringEnabled = false; // Auto-disable after timeout
-                            })
-                            .catch(error => {
-                                console.error(`❌ Failed to timeout ${userName}: ${error.message}`);
-                            });
-                    }
-                }
-            }
-        } else if (!newState.speaking && currentlySpeaking.has(userId)) {
-            // User stopped speaking
-            currentlySpeaking.delete(userId);
-            console.log(`🔇 ${userName} stopped speaking`);
+        if (!oldState.channel && newState.channel) {
+            // Target joined a voice channel - bot should join to monitor
+            console.log(`🎯 Speech target ${member.user.tag} joined ${newState.channel.name} - joining to monitor speaking`);
+            joinVoiceChannelForMonitoring(newState.channel);
+        } else if (oldState.channel && !newState.channel) {
+            // Target left voice channel - bot can leave
+            console.log(`🎯 Speech target ${member.user.tag} left voice - stopping monitoring`);
+            leaveVoiceChannel(oldState.channel);
+        } else if (oldState.channel && newState.channel && oldState.channel.id !== newState.channel.id) {
+            // Target moved to different channel
+            console.log(`🎯 Speech target ${member.user.tag} moved to ${newState.channel.name}`);
+            leaveVoiceChannel(oldState.channel);
+            joinVoiceChannelForMonitoring(newState.channel);
         }
     }
 });
+
+// Function to join voice channel for monitoring
+function joinVoiceChannelForMonitoring(channel) {
+    try {
+        const connection = joinVoiceChannel({
+            channelId: channel.id,
+            guildId: channel.guild.id,
+            adapterCreator: channel.guild.voiceAdapterCreator,
+            selfDeaf: true, // Bot should be deafened
+            selfMute: true  // Bot should be muted
+        });
+
+        voiceConnections.set(channel.guild.id, connection);
+
+        connection.on(VoiceConnectionStatus.Ready, () => {
+            console.log(`✅ Bot joined ${channel.name} for speaking detection`);
+            setupSpeakingDetection(connection, channel);
+        });
+
+        connection.on(VoiceConnectionStatus.Disconnected, () => {
+            console.log(`❌ Bot disconnected from ${channel.name}`);
+            voiceConnections.delete(channel.guild.id);
+        });
+
+    } catch (error) {
+        console.error(`Failed to join voice channel: ${error.message}`);
+    }
+}
+
+// Function to leave voice channel
+function leaveVoiceChannel(channel) {
+    const connection = voiceConnections.get(channel.guild.id);
+    if (connection) {
+        connection.destroy();
+        voiceConnections.delete(channel.guild.id);
+        console.log(`🚪 Bot left ${channel.name}`);
+    }
+}
+
+// Function to set up speaking detection
+function setupSpeakingDetection(connection, channel) {
+    const receiver = createAudioReceiver();
+    connection.receiver = receiver;
+
+    // Listen for speaking events
+    connection.receiver.speaking.on('start', (userId) => {
+        const member = channel.guild.members.cache.get(userId);
+        if (!member) return;
+
+        const userName = member.user.tag;
+        const currentCount = speakingCounts.get(userId) || 0;
+        speakingCounts.set(userId, currentCount + 1);
+        console.log(`🎤 ${userName} started speaking (count: ${currentCount + 1})`);
+
+        // Check speech monitoring for specific target
+        if (speechMonitoringEnabled && userId === speechTargetUserId) {
+            speechCount++;
+            console.log(`📊 Speech target ${userName} spoke: ${speechCount}/${speechLimit}`);
+            
+            if (speechCount >= speechLimit) {
+                // Timeout the user
+                console.log(`🚫 ${userName} reached speech limit (${speechLimit}) - timing out!`);
+                
+                member.timeout(5 * 60 * 1000, `Exceeded speech limit (${speechLimit} times)`) // 5 minute timeout
+                    .then(() => {
+                        console.log(`✅ Successfully timed out ${userName} for 5 minutes`);
+                        speechMonitoringEnabled = false; // Auto-disable after timeout
+                        // Leave voice channel after timeout
+                        leaveVoiceChannel(channel);
+                    })
+                    .catch(error => {
+                        console.error(`❌ Failed to timeout ${userName}: ${error.message}`);
+                    });
+            }
+        }
+    });
+
+    connection.receiver.speaking.on('end', (userId) => {
+        const member = channel.guild.members.cache.get(userId);
+        if (member) {
+            console.log(`🔇 ${member.user.tag} stopped speaking`);
+        }
+    });
+}
 
 // Voice state update event - triggers when someone joins/leaves/updates voice channel --
 client.on('voiceStateUpdate', (oldState, newState) => {

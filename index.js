@@ -345,7 +345,10 @@ const commands = [
                 .setDescription('Speaking limit before timeout (default: 10)')
                 .setRequired(false)
                 .setMinValue(1)
-                .setMaxValue(100))
+                .setMaxValue(100)),
+    new SlashCommandBuilder()
+        .setName('permissions')
+        .setDescription('Check bot permissions for debugging')
 ];
 
 // Bot ready event
@@ -564,6 +567,46 @@ client.on('interactionCreate', async interaction => {
             });
             console.log(`Speech count reset by ${interaction.user.tag}`);
         }
+    } else if (interaction.commandName === 'permissions') {
+        const guild = interaction.guild;
+        const botMember = guild.members.cache.get(client.user.id);
+        
+        if (!botMember) {
+            await interaction.reply({ content: '❌ Could not find bot member in this server', ephemeral: true });
+            return;
+        }
+        
+        const permissions = botMember.permissions;
+        const requiredPerms = [
+            { name: 'Moderate Members', key: 'ModerateMembers', needed: true },
+            { name: 'Kick Members', key: 'KickMembers', needed: true },
+            { name: 'Move Members', key: 'MoveMembers', needed: true },
+            { name: 'Connect', key: 'Connect', needed: true },
+            { name: 'View Channel', key: 'ViewChannel', needed: true }
+        ];
+        
+        let permissionText = '🔐 **Bot Permissions Check**\n\n';
+        
+        for (const perm of requiredPerms) {
+            const hasPermission = permissions.has(perm.key);
+            const emoji = hasPermission ? '✅' : '❌';
+            const status = hasPermission ? 'GRANTED' : 'MISSING';
+            permissionText += `${emoji} **${perm.name}**: ${status}\n`;
+        }
+        
+        permissionText += '\n**Permission Usage:**\n';
+        permissionText += '• **Moderate Members** → Timeout users (speech monitoring)\n';
+        permissionText += '• **Kick Members** → Fallback when timeout fails\n';
+        permissionText += '• **Move Members** → Discipline mode\n';
+        permissionText += '• **Connect** → Join voice channels\n';
+        permissionText += '• **View Channel** → See voice channels\n';
+        
+        if (!permissions.has('ModerateMembers')) {
+            permissionText += '\n⚠️ **Missing "Moderate Members" permission!**\n';
+            permissionText += 'Speech monitoring will fall back to voice kicks instead of timeouts.';
+        }
+        
+        await interaction.reply({ content: permissionText, ephemeral: true });
     }
 });
 

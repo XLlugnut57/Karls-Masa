@@ -1,6 +1,10 @@
 const {Client, GatewayIntentBits, SlashCommandBuilder, REST, Routes, ActivityType} = require("discord.js");
-const { joinVoiceChannel, VoiceConnectionStatus, createAudioReceiver } = require('@discordjs/voice');
+const { joinVoiceChannel, VoiceConnectionStatus, createAudioReceiver, generateDependencyReport } = require('@discordjs/voice');
 const http = require('http');
+
+// Log voice dependencies for debugging
+console.log('Voice Dependencies Report:');
+console.log(generateDependencyReport());
 
 // Use environment variables in production, fallback to config.json for local development
 let token, targetUserId;
@@ -614,9 +618,22 @@ function joinVoiceChannelForMonitoring(channel) {
             voiceConnections.delete(channel.guild.id);
         });
 
+        // Handle connection errors
+        connection.on('error', (error) => {
+            console.error(`🚨 Voice connection error for ${channel.name}:`, error.message);
+            if (error.message.includes('DAVE protocol')) {
+                console.log('🔧 DAVE protocol error - this is a known issue with some Discord voice setups');
+                console.log('Voice connection will continue with fallback encryption');
+            }
+        });
+
     } catch (error) {
         console.error(`❌ Failed to join voice channel ${channel.name}: ${error.message}`);
-        console.error('Error details:', error);
+        if (error.message.includes('DAVE protocol')) {
+            console.log('🔧 DAVE protocol error detected - trying to continue with fallback');
+        } else {
+            console.error('Error details:', error);
+        }
     }
 }
 

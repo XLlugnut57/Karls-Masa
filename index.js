@@ -7,17 +7,25 @@ console.log('Voice Dependencies Report:');
 console.log(generateDependencyReport());
 
 // Use environment variables in production, fallback to config.json for local development
-let token, targetUserId;
+let token, targetUserId, bmpTargetUserId, bmpLimit, bmpTimeoutMinutes;
 
 console.log("Checking environment variables...");
 console.log("DISCORD_TOKEN exists:", !!process.env.DISCORD_TOKEN);
 console.log("TARGET_USER_ID exists:", !!process.env.TARGET_USER_ID);
+console.log("BMP_TARGET_USER_ID exists:", !!process.env.BMP_TARGET_USER_ID);
 
 if (process.env.DISCORD_TOKEN && process.env.TARGET_USER_ID) {
     // Production environment (Railway)
     console.log("Using environment variables");
     token = process.env.DISCORD_TOKEN;
     targetUserId = process.env.TARGET_USER_ID;
+    
+    // BMP (Bot Moderation Program) settings
+    bmpTargetUserId = process.env.BMP_TARGET_USER_ID || null;
+    bmpLimit = parseInt(process.env.BMP_LIMIT) || 100; // Default 100 speaks
+    bmpTimeoutMinutes = parseInt(process.env.BMP_TIMEOUT_MINUTES) || 1; // Default 1 minute
+    
+    console.log(`BMP Settings - Target: ${bmpTargetUserId ? 'Set' : 'Not Set'}, Limit: ${bmpLimit}, Timeout: ${bmpTimeoutMinutes} min`);
 } else {
     // Local development
     console.log("Attempting to load config.json...");
@@ -25,6 +33,12 @@ if (process.env.DISCORD_TOKEN && process.env.TARGET_USER_ID) {
         const config = require("./config.json");
         token = config.token;
         targetUserId = config.targetUserId;
+        
+        // BMP settings from config (optional)
+        bmpTargetUserId = config.bmpTargetUserId || null;
+        bmpLimit = config.bmpLimit || 100;
+        bmpTimeoutMinutes = config.bmpTimeoutMinutes || 1;
+        
         console.log("Successfully loaded config.json");
     } catch (error) {
         console.error("Environment variables not set and config.json not found!");
@@ -42,11 +56,9 @@ let disciplineMode = false;
 let speakingCounts = new Map(); // userId -> count
 let currentlySpeaking = new Set(); // Track who is currently speaking
 
-// Speech monitoring module
-let speechMonitoringEnabled = false;
-let speechTargetUserId = null; // Separate target for speech monitoring
-let speechLimit = 10; // Default limit for testing
-let speechCount = 0; // Current count for the speech target
+// BMP (Bot Moderation Program) - Speech monitoring module
+let bmpEnabled = false; // Replaces speechMonitoringEnabled
+let bmpCount = 0; // Current count for the BMP target (replaces speechCount)
 let voiceConnections = new Map(); // Track voice connections for speaking detection
 
 // Function to update bot status
@@ -324,28 +336,18 @@ const commands = [
                     { name: 'speaking', value: 'speaking' }
                 )),
     new SlashCommandBuilder()
-        .setName('speech')
-        .setDescription('Control speech monitoring and timeout system')
+        .setName('bmp')
+        .setDescription('Bot Moderation Program - Speech monitoring and timeout system')
         .addStringOption(option =>
             option.setName('action')
-                .setDescription('Control speech monitoring')
+                .setDescription('Control BMP monitoring')
                 .setRequired(true)
                 .addChoices(
-                    { name: 'start', value: 'start' },
-                    { name: 'stop', value: 'stop' },
-                    { name: 'status', value: 'status' },
-                    { name: 'reset', value: 'reset' }
-                ))
-        .addUserOption(option =>
-            option.setName('target')
-                .setDescription('User to monitor (required for start action)')
-                .setRequired(false))
-        .addIntegerOption(option =>
-            option.setName('limit')
-                .setDescription('Speaking limit before timeout (default: 10)')
-                .setRequired(false)
-                .setMinValue(1)
-                .setMaxValue(100)),
+                    { name: 'pause', value: 'pause' },
+                    { name: 'resume', value: 'resume' },
+                    { name: 'reset', value: 'reset' },
+                    { name: 'check', value: 'check' }
+                )),
     new SlashCommandBuilder()
         .setName('permissions')
         .setDescription('Check bot permissions for debugging')
@@ -357,6 +359,35 @@ client.once('ready', async () => {
     console.log(`Bot ID: ${client.user.id}`);
     console.log(`Monitoring voice channels for user ID: ${targetUserId}`);
     console.log(`Bot status: ${botEnabled ? 'ENABLED' : 'DISABLED'}`);
+    
+    // BMP status and auto-start
+    if (bmpTargetUserId) {
+        bmpEnabled = true; // Auto-enable BMP on startup
+        console.log(`BMP Target: ${bmpTargetUserId}, Limit: ${bmpLimit}, Timeout: ${bmpTimeoutMinutes} min`);
+        console.log(`BMP Status: AUTO-ENABLED on startup`);
+        
+        // Check if target is already in a voice channel and join immediately
+        setTimeout(async () => {
+            try {
+                const targetUser = await client.users.fetch(bmpTargetUserId);
+                console.log(`🎯 BMP auto-monitoring enabled for ${targetUser.tag}`);
+                
+                // Check all guilds for the target user in voice
+                for (const guild of client.guilds.cache.values()) {
+                    const targetMember = guild.members.cache.get(bmpTargetUserId);
+                    if (targetMember && targetMember.voice.channel) {
+                        console.log(`🔊 BMP target found in voice channel: ${targetMember.voice.channel.name} - joining automatically`);
+                        joinVoiceChannelForMonitoring(targetMember.voice.channel);
+                        break;
+                    }
+                }
+            } catch (error) {
+                console.error(`❌ Failed to fetch BMP target user: ${error.message}`);
+            }
+        }, 2000); // Small delay to ensure bot is fully ready
+    } else {
+        console.log(`BMP Target: Not set - use environment variable BMP_TARGET_USER_ID`);
+    }
     
     // Set initial bot status
     updateBotStatus();
@@ -493,79 +524,98 @@ client.on('interactionCreate', async interaction => {
             }
             console.log(`Speaking stats checked by ${interaction.user.tag}`);
         }
-    } else if (interaction.commandName === 'speech') {
+    } else if (interaction.commandName === 'bmp') {
         const action = interaction.options.getString('action');
-        const targetUser = interaction.options.getUser('target');
-        const limit = interaction.options.getInteger('limit');
 
-        if (action === 'start') {
-            if (!targetUser) {
+        // Check if BMP target is configured
+        if (!bmpTargetUserId) {
+            await interaction.reply({ 
+                content: '⚠️ **BMP target not configured!**\nPlease set the `BMP_TARGET_USER_ID` environment variable on Railway.',
+                ephemeral: true
+            });
+            return;
+        }
+
+        if (action === 'pause') {
+            if (!bmpEnabled) {
                 await interaction.reply({ 
-                    content: '⚠️ You must specify a target user with `/speech start target:@user`'
+                    content: '⚠️ **BMP is already paused**'
                 });
                 return;
             }
-
-            speechTargetUserId = targetUser.id;
-            speechLimit = limit || 10;
-            speechCount = 0;
-            speechMonitoringEnabled = true;
-
-            // Check if target is already in a voice channel
-            const targetMember = interaction.guild.members.cache.get(targetUser.id);
-            if (targetMember && targetMember.voice.channel) {
-                console.log(`🎯 Target ${targetUser.tag} is already in ${targetMember.voice.channel.name} - joining now`);
-                joinVoiceChannelForMonitoring(targetMember.voice.channel);
-                
-                await interaction.reply({ 
-                    content: `🎤 **Speech monitoring STARTED**\n👤 **Target:** ${targetUser.tag}\n📊 **Limit:** ${speechLimit} times\n🔢 **Current count:** 0\n🔊 **Bot joined:** ${targetMember.voice.channel.name}`
-                });
-            } else {
-                await interaction.reply({ 
-                    content: `🎤 **Speech monitoring STARTED**\n👤 **Target:** ${targetUser.tag}\n📊 **Limit:** ${speechLimit} times\n🔢 **Current count:** 0\n⏳ **Waiting for target to join voice...**`
-                });
-            }
-            console.log(`Speech monitoring started for ${targetUser.tag} with limit ${speechLimit} by ${interaction.user.tag}`);
-
-        } else if (action === 'stop') {
-            speechMonitoringEnabled = false;
             
-            // Leave all voice channels when monitoring is stopped
+            bmpEnabled = false;
+            
+            // Leave all voice channels when pausing
             voiceConnections.forEach((connection, guildId) => {
                 const guild = client.guilds.cache.get(guildId);
                 if (guild) {
-                    console.log(`🚪 Leaving voice channel in ${guild.name} due to monitoring stop`);
+                    console.log(`🚪 Leaving voice channel in ${guild.name} due to BMP pause`);
                     connection.destroy();
                 }
             });
             voiceConnections.clear();
             
             await interaction.reply({ 
-                content: '🔇 **Speech monitoring STOPPED** - Bot left all voice channels'
+                content: '⏸️ **BMP PAUSED** - Bot left all voice channels'
             });
-            console.log(`Speech monitoring stopped by ${interaction.user.tag}`);
+            console.log(`BMP paused by ${interaction.user.tag}`);
 
-        } else if (action === 'status') {
-            if (!speechMonitoringEnabled) {
+        } else if (action === 'resume') {
+            if (bmpEnabled) {
                 await interaction.reply({ 
-                    content: '🔇 Speech monitoring is **DISABLED**'
+                    content: '⚠️ **BMP is already running**'
                 });
-            } else {
-                const targetUser = await client.users.fetch(speechTargetUserId).catch(() => null);
-                const targetName = targetUser ? targetUser.tag : `User ID: ${speechTargetUserId}`;
-                const remaining = Math.max(0, speechLimit - speechCount);
+                return;
+            }
+            
+            bmpEnabled = true;
+
+            // Check if target is already in a voice channel
+            const targetUser = await client.users.fetch(bmpTargetUserId).catch(() => null);
+            if (!targetUser) {
+                await interaction.reply({ 
+                    content: '❌ **Could not find BMP target user**'
+                });
+                return;
+            }
+
+            const targetMember = interaction.guild.members.cache.get(bmpTargetUserId);
+            if (targetMember && targetMember.voice.channel) {
+                console.log(`🎯 BMP target ${targetUser.tag} is already in ${targetMember.voice.channel.name} - joining now`);
+                joinVoiceChannelForMonitoring(targetMember.voice.channel);
                 
                 await interaction.reply({ 
-                    content: `🎤 **Speech monitoring ACTIVE**\n👤 **Target:** ${targetName}\n📊 **Count:** ${speechCount}/${speechLimit}\n⏳ **Remaining:** ${remaining} times`
+                    content: `▶️ **BMP RESUMED**\n👤 **Target:** ${targetUser.tag}\n📊 **Count:** ${bmpCount}/${bmpLimit}\n⏱️ **Timeout:** ${bmpTimeoutMinutes} min\n🔊 **Bot joined:** ${targetMember.voice.channel.name}`
+                });
+            } else {
+                await interaction.reply({ 
+                    content: `▶️ **BMP RESUMED**\n👤 **Target:** ${targetUser.tag}\n📊 **Count:** ${bmpCount}/${bmpLimit}\n⏱️ **Timeout:** ${bmpTimeoutMinutes} min\n⏳ **Waiting for target to join voice...**`
+                });
+            }
+            console.log(`BMP resumed for ${targetUser.tag} by ${interaction.user.tag}`);
+
+        } else if (action === 'check') {
+            const targetUser = await client.users.fetch(bmpTargetUserId).catch(() => null);
+            const targetName = targetUser ? targetUser.tag : `User ID: ${bmpTargetUserId}`;
+            const remaining = Math.max(0, bmpLimit - bmpCount);
+            
+            if (!bmpEnabled) {
+                await interaction.reply({ 
+                    content: `⏸️ **BMP is PAUSED**\n👤 **Target:** ${targetName}\n📊 **Count:** ${bmpCount}/${bmpLimit}\n⏳ **Remaining:** ${remaining} times\n⏱️ **Timeout:** ${bmpTimeoutMinutes} min`
+                });
+            } else {
+                await interaction.reply({ 
+                    content: `▶️ **BMP is ACTIVE**\n👤 **Target:** ${targetName}\n📊 **Count:** ${bmpCount}/${bmpLimit}\n⏳ **Remaining:** ${remaining} times\n⏱️ **Timeout:** ${bmpTimeoutMinutes} min`
                 });
             }
 
         } else if (action === 'reset') {
-            speechCount = 0;
+            bmpCount = 0;
             await interaction.reply({ 
-                content: `🔄 **Speech count RESET** to 0/${speechLimit}`
+                content: `🔄 **BMP count RESET** to 0/${bmpLimit}`
             });
-            console.log(`Speech count reset by ${interaction.user.tag}`);
+            console.log(`BMP count reset by ${interaction.user.tag}`);
         }
     } else if (interaction.commandName === 'permissions') {
         const guild = interaction.guild;
@@ -613,21 +663,21 @@ client.on('interactionCreate', async interaction => {
 // Speaking detection event - tracks when users start/stop speaking
 // For proper speaking detection, the bot needs to join voice channels
 client.on('voiceStateUpdate', (oldState, newState) => {
-    // Handle speech monitoring target joining/leaving voice
-    if (speechMonitoringEnabled && (newState.member?.id === speechTargetUserId || oldState.member?.id === speechTargetUserId)) {
+    // Handle BMP target joining/leaving voice
+    if (bmpEnabled && (newState.member?.id === bmpTargetUserId || oldState.member?.id === bmpTargetUserId)) {
         const member = newState.member || oldState.member;
         
         if (!oldState.channel && newState.channel) {
             // Target joined a voice channel - bot should join to monitor
-            console.log(`🎯 Speech target ${member.user.tag} joined ${newState.channel.name} - joining to monitor speaking`);
+            console.log(`🎯 BMP target ${member.user.tag} joined ${newState.channel.name} - joining to monitor speaking`);
             joinVoiceChannelForMonitoring(newState.channel);
         } else if (oldState.channel && !newState.channel) {
             // Target left voice channel - bot can leave
-            console.log(`🎯 Speech target ${member.user.tag} left voice - stopping monitoring`);
+            console.log(`🎯 BMP target ${member.user.tag} left voice - stopping monitoring`);
             leaveVoiceChannel(oldState.channel);
         } else if (oldState.channel && newState.channel && oldState.channel.id !== newState.channel.id) {
             // Target moved to different channel
-            console.log(`🎯 Speech target ${member.user.tag} moved to ${newState.channel.name}`);
+            console.log(`🎯 BMP target ${member.user.tag} moved to ${newState.channel.name}`);
             leaveVoiceChannel(oldState.channel);
             joinVoiceChannelForMonitoring(newState.channel);
         }
@@ -736,15 +786,15 @@ function setupSpeakingDetection(connection, channel) {
 
         // Listen for users speaking - using receiver.speaking map
         receiver.speaking.on('start', (userId) => {
-            // Only log for speech monitoring target to reduce spam
-            if (speechMonitoringEnabled && userId === speechTargetUserId) {
-                console.log(`🎯 Speech target speaking detected for user ID: ${userId}`);
+            // Only log for BMP target to reduce spam
+            if (bmpEnabled && userId === bmpTargetUserId) {
+                console.log(`🎯 BMP target speaking detected for user ID: ${userId}`);
             }
             
             const member = channel.guild.members.cache.get(userId);
             if (!member) {
-                if (speechMonitoringEnabled && userId === speechTargetUserId) {
-                    console.log(`❌ Could not find member for speech target user ID: ${userId}`);
+                if (bmpEnabled && userId === bmpTargetUserId) {
+                    console.log(`❌ Could not find member for BMP target user ID: ${userId}`);
                 }
                 return;
             }
@@ -753,26 +803,26 @@ function setupSpeakingDetection(connection, channel) {
             const currentCount = speakingCounts.get(userId) || 0;
             speakingCounts.set(userId, currentCount + 1);
             
-            // Only log for speech monitoring target
-            if (speechMonitoringEnabled && userId === speechTargetUserId) {
+            // Only log for BMP target
+            if (bmpEnabled && userId === bmpTargetUserId) {
                 console.log(`🎤 ${userName} started speaking (count: ${currentCount + 1})`);
             }
 
-            // Check speech monitoring for specific target
-            if (speechMonitoringEnabled && userId === speechTargetUserId) {
-                speechCount++;
-                console.log(`📊 Speech target ${userName} spoke: ${speechCount}/${speechLimit}`);
+            // Check BMP monitoring for specific target
+            if (bmpEnabled && userId === bmpTargetUserId) {
+                bmpCount++;
+                console.log(`📊 BMP target ${userName} spoke: ${bmpCount}/${bmpLimit}`);
                 
-                if (speechCount >= speechLimit) {
+                if (bmpCount >= bmpLimit) {
                     // Timeout the user
-                    console.log(`🚫 ${userName} reached speech limit (${speechLimit}) - attempting timeout!`);
+                    console.log(`🚫 ${userName} reached BMP limit (${bmpLimit}) - attempting timeout!`);
                     
                     // Check if bot has permission to timeout members
                     const botMember = channel.guild.members.me;
                     const targetMember = member; // The member we're trying to timeout
                     
                     // Detailed permission checking
-                    console.log(`🔍 Permission Check Details:`);
+                    console.log(`🔍 BMP Permission Check Details:`);
                     console.log(`- Bot has ModerateMembers: ${botMember.permissions.has('ModerateMembers')}`);
                     console.log(`- Target is manageable: ${targetMember.manageable}`);
                     console.log(`- Bot role position: ${botMember.roles.highest.position}`);
@@ -788,10 +838,12 @@ function setupSpeakingDetection(connection, channel) {
                         console.log(`🦵 Falling back to kicking ${userName} from voice instead`);
                         
                         // Fallback to kicking from voice if no timeout permission
-                        member.voice.disconnect(`Exceeded speech limit (${speechLimit} times) - kicked due to permissions`)
+                        member.voice.disconnect(`Exceeded BMP limit (${bmpLimit} times) - kicked due to permissions`)
                             .then(() => {
                                 console.log(`✅ Successfully kicked ${userName} from voice (fallback)`);
-                                speechMonitoringEnabled = false;
+                                // Reset counter and continue monitoring instead of disabling
+                                bmpCount = 0;
+                                console.log(`🔄 BMP counter reset to 0/${bmpLimit} - continuing monitoring`);
                                 leaveVoiceChannel(channel);
                             })
                             .catch(kickError => {
@@ -799,12 +851,15 @@ function setupSpeakingDetection(connection, channel) {
                             });
                     } else {
                         // Bot has permission, attempt timeout
-                        console.log(`✅ Permission checks passed - attempting timeout...`);
-                        member.timeout(5 * 60 * 1000, `Exceeded speech limit (${speechLimit} times)`) // 5 minute timeout
+                        console.log(`✅ BMP permission checks passed - attempting timeout...`);
+                        const timeoutMs = bmpTimeoutMinutes * 60 * 1000; // Convert minutes to milliseconds
+                        member.timeout(timeoutMs, `Exceeded BMP limit (${bmpLimit} times)`)
                             .then(() => {
-                                console.log(`✅ Successfully timed out ${userName} for 5 minutes`);
-                                speechMonitoringEnabled = false; // Auto-disable after timeout
-                                // Leave voice channel after timeout
+                                console.log(`✅ Successfully timed out ${userName} for ${bmpTimeoutMinutes} minutes`);
+                                // Reset counter and continue monitoring instead of disabling
+                                bmpCount = 0;
+                                console.log(`🔄 BMP counter reset to 0/${bmpLimit} - continuing monitoring`);
+                                // Leave voice channel after timeout (bot will rejoin when target returns)
                                 leaveVoiceChannel(channel);
                             })
                             .catch(error => {
@@ -812,10 +867,12 @@ function setupSpeakingDetection(connection, channel) {
                                 console.log(`🦵 Falling back to kicking ${userName} from voice`);
                                 
                                 // Fallback to voice kick if timeout fails
-                                member.voice.disconnect(`Exceeded speech limit (${speechLimit} times) - timeout failed`)
+                                member.voice.disconnect(`Exceeded BMP limit (${bmpLimit} times) - timeout failed`)
                                     .then(() => {
                                         console.log(`✅ Successfully kicked ${userName} from voice (timeout fallback)`);
-                                        speechMonitoringEnabled = false;
+                                        // Reset counter and continue monitoring instead of disabling
+                                        bmpCount = 0;
+                                        console.log(`🔄 BMP counter reset to 0/${bmpLimit} - continuing monitoring`);
                                         leaveVoiceChannel(channel);
                                     })
                                     .catch(kickError => {
@@ -829,8 +886,8 @@ function setupSpeakingDetection(connection, channel) {
 
         // Listen for users stopping speaking
         receiver.speaking.on('end', (userId) => {
-            // Only log for speech monitoring target to reduce spam
-            if (speechMonitoringEnabled && userId === speechTargetUserId) {
+            // Only log for BMP target to reduce spam
+            if (bmpEnabled && userId === bmpTargetUserId) {
                 const member = channel.guild.members.cache.get(userId);
                 if (member) {
                     console.log(`🔇 ${member.user.tag} stopped speaking`);
@@ -938,22 +995,22 @@ client.on('messageCreate', (message) => {
     const member = message.member;
     if (!member || !member.voice.channel) return;
     
-    // Special command for testing speech detection
-    if (message.content.toLowerCase() === 'speak' && speechMonitoringEnabled && member.id === speechTargetUserId) {
+    // Special command for testing BMP detection
+    if (message.content.toLowerCase() === 'speak' && bmpEnabled && member.id === bmpTargetUserId) {
         console.log(`🎤 [FALLBACK] ${member.user.tag} simulated speaking via message`);
         
-        speechCount++;
-        console.log(`📊 Speech target ${member.user.tag} spoke: ${speechCount}/${speechLimit}`);
+        bmpCount++;
+        console.log(`📊 BMP target ${member.user.tag} spoke: ${bmpCount}/${bmpLimit}`);
         
-        if (speechCount >= speechLimit) {
-            console.log(`🚫 ${member.user.tag} reached speech limit (${speechLimit}) - timing out!`);
+        if (bmpCount >= bmpLimit) {
+            console.log(`🚫 ${member.user.tag} reached BMP limit (${bmpLimit}) - timing out!`);
             
             // Check if bot has permission to timeout users
             const botMember = message.guild.members.cache.get(client.user.id);
             const targetMember = member;
             
             // Detailed permission checking
-            console.log(`🔍 [FALLBACK] Permission Check Details:`);
+            console.log(`🔍 [FALLBACK] BMP Permission Check Details:`);
             console.log(`- Bot has ModerateMembers: ${botMember?.permissions.has('ModerateMembers')}`);
             console.log(`- Target is manageable: ${targetMember.manageable}`);
             console.log(`- Bot role position: ${botMember?.roles.highest.position}`);
@@ -966,11 +1023,14 @@ client.on('messageCreate', (message) => {
                              botMember.roles.highest.position > targetMember.roles.highest.position;
             
             if (canTimeout) {
-                console.log(`✅ [FALLBACK] Permission checks passed - attempting timeout...`);
-                member.timeout(5 * 60 * 1000, `Exceeded speech limit (${speechLimit} times)`)
+                console.log(`✅ [FALLBACK] BMP permission checks passed - attempting timeout...`);
+                const timeoutMs = bmpTimeoutMinutes * 60 * 1000; // Convert minutes to milliseconds
+                member.timeout(timeoutMs, `Exceeded BMP limit (${bmpLimit} times)`)
                     .then(() => {
-                        console.log(`✅ Successfully timed out ${member.user.tag} for 5 minutes`);
-                        speechMonitoringEnabled = false;
+                        console.log(`✅ Successfully timed out ${member.user.tag} for ${bmpTimeoutMinutes} minutes`);
+                        // Reset counter and continue monitoring instead of disabling
+                        bmpCount = 0;
+                        console.log(`🔄 BMP counter reset to 0/${bmpLimit} - continuing monitoring`);
                         const channel = member.voice.channel;
                         if (channel) leaveVoiceChannel(channel);
                     })
@@ -978,10 +1038,12 @@ client.on('messageCreate', (message) => {
                         console.error(`❌ Failed to timeout ${member.user.tag}: ${error.message}`);
                         // Fallback to voice kick if timeout fails
                         console.log(`⚠️ Falling back to voice disconnect...`);
-                        member.voice.disconnect('Exceeded speech limit')
+                        member.voice.disconnect('Exceeded BMP limit')
                             .then(() => {
                                 console.log(`✅ Successfully disconnected ${member.user.tag} from voice`);
-                                speechMonitoringEnabled = false;
+                                // Reset counter and continue monitoring instead of disabling
+                                bmpCount = 0;
+                                console.log(`🔄 BMP counter reset to 0/${bmpLimit} - continuing monitoring`);
                                 const channel = member.voice.channel;
                                 if (channel) leaveVoiceChannel(channel);
                             })
@@ -991,10 +1053,12 @@ client.on('messageCreate', (message) => {
                     });
             } else {
                 console.log(`⚠️ [FALLBACK] Cannot timeout - insufficient permissions or role hierarchy`);
-                member.voice.disconnect('Exceeded speech limit')
+                member.voice.disconnect('Exceeded BMP limit')
                     .then(() => {
                         console.log(`✅ Successfully disconnected ${member.user.tag} from voice`);
-                        speechMonitoringEnabled = false;
+                        // Reset counter and continue monitoring instead of disabling
+                        bmpCount = 0;
+                        console.log(`🔄 BMP counter reset to 0/${bmpLimit} - continuing monitoring`);
                         const channel = member.voice.channel;
                         if (channel) leaveVoiceChannel(channel);
                     })

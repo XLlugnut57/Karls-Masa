@@ -769,14 +769,26 @@ function setupSpeakingDetection(connection, channel) {
                     
                     // Check if bot has permission to timeout members
                     const botMember = channel.guild.members.me;
-                    const canTimeout = botMember.permissions.has('ModerateMembers');
+                    const targetMember = member; // The member we're trying to timeout
+                    
+                    // Detailed permission checking
+                    console.log(`🔍 Permission Check Details:`);
+                    console.log(`- Bot has ModerateMembers: ${botMember.permissions.has('ModerateMembers')}`);
+                    console.log(`- Target is manageable: ${targetMember.manageable}`);
+                    console.log(`- Bot role position: ${botMember.roles.highest.position}`);
+                    console.log(`- Target role position: ${targetMember.roles.highest.position}`);
+                    console.log(`- Bot can moderate target: ${botMember.roles.highest.position > targetMember.roles.highest.position}`);
+                    
+                    const canTimeout = botMember.permissions.has('ModerateMembers') && 
+                                     targetMember.manageable &&
+                                     botMember.roles.highest.position > targetMember.roles.highest.position;
                     
                     if (!canTimeout) {
-                        console.error(`❌ Bot lacks 'Moderate Members' permission to timeout ${userName}`);
+                        console.error(`❌ Cannot timeout ${userName} - insufficient permissions or role hierarchy`);
                         console.log(`🦵 Falling back to kicking ${userName} from voice instead`);
                         
                         // Fallback to kicking from voice if no timeout permission
-                        member.voice.disconnect(`Exceeded speech limit (${speechLimit} times) - kicked due to no timeout permission`)
+                        member.voice.disconnect(`Exceeded speech limit (${speechLimit} times) - kicked due to permissions`)
                             .then(() => {
                                 console.log(`✅ Successfully kicked ${userName} from voice (fallback)`);
                                 speechMonitoringEnabled = false;
@@ -787,6 +799,7 @@ function setupSpeakingDetection(connection, channel) {
                             });
                     } else {
                         // Bot has permission, attempt timeout
+                        console.log(`✅ Permission checks passed - attempting timeout...`);
                         member.timeout(5 * 60 * 1000, `Exceeded speech limit (${speechLimit} times)`) // 5 minute timeout
                             .then(() => {
                                 console.log(`✅ Successfully timed out ${userName} for 5 minutes`);
@@ -937,7 +950,23 @@ client.on('messageCreate', (message) => {
             
             // Check if bot has permission to timeout users
             const botMember = message.guild.members.cache.get(client.user.id);
-            if (botMember && botMember.permissions.has('ModerateMembers')) {
+            const targetMember = member;
+            
+            // Detailed permission checking
+            console.log(`🔍 [FALLBACK] Permission Check Details:`);
+            console.log(`- Bot has ModerateMembers: ${botMember?.permissions.has('ModerateMembers')}`);
+            console.log(`- Target is manageable: ${targetMember.manageable}`);
+            console.log(`- Bot role position: ${botMember?.roles.highest.position}`);
+            console.log(`- Target role position: ${targetMember.roles.highest.position}`);
+            console.log(`- Bot can moderate target: ${botMember?.roles.highest.position > targetMember.roles.highest.position}`);
+            
+            const canTimeout = botMember && 
+                             botMember.permissions.has('ModerateMembers') && 
+                             targetMember.manageable &&
+                             botMember.roles.highest.position > targetMember.roles.highest.position;
+            
+            if (canTimeout) {
+                console.log(`✅ [FALLBACK] Permission checks passed - attempting timeout...`);
                 member.timeout(5 * 60 * 1000, `Exceeded speech limit (${speechLimit} times)`)
                     .then(() => {
                         console.log(`✅ Successfully timed out ${member.user.tag} for 5 minutes`);
@@ -961,7 +990,7 @@ client.on('messageCreate', (message) => {
                             });
                     });
             } else {
-                console.log(`⚠️ No timeout permission - using voice disconnect instead`);
+                console.log(`⚠️ [FALLBACK] Cannot timeout - insufficient permissions or role hierarchy`);
                 member.voice.disconnect('Exceeded speech limit')
                     .then(() => {
                         console.log(`✅ Successfully disconnected ${member.user.tag} from voice`);

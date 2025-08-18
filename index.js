@@ -526,8 +526,19 @@ client.on('interactionCreate', async interaction => {
 
         } else if (action === 'stop') {
             speechMonitoringEnabled = false;
+            
+            // Leave all voice channels when monitoring is stopped
+            voiceConnections.forEach((connection, guildId) => {
+                const guild = client.guilds.cache.get(guildId);
+                if (guild) {
+                    console.log(`🚪 Leaving voice channel in ${guild.name} due to monitoring stop`);
+                    connection.destroy();
+                }
+            });
+            voiceConnections.clear();
+            
             await interaction.reply({ 
-                content: '🔇 **Speech monitoring STOPPED**'
+                content: '🔇 **Speech monitoring STOPPED** - Bot left all voice channels'
             });
             console.log(`Speech monitoring stopped by ${interaction.user.tag}`);
 
@@ -587,8 +598,9 @@ function joinVoiceChannelForMonitoring(channel) {
     try {
         // Check if bot has permissions
         const permissions = channel.permissionsFor(channel.guild.members.me);
-        if (!permissions.has(['ViewChannel', 'Connect'])) {
+        if (!permissions || !permissions.has(['ViewChannel', 'Connect'])) {
             console.error(`❌ Missing permissions to join ${channel.name}`);
+            console.error(`Bot permissions:`, permissions ? permissions.toArray() : 'No permissions found');
             return;
         }
 
@@ -681,18 +693,27 @@ function setupSpeakingDetection(connection, channel) {
 
         // Listen for users speaking - using receiver.speaking map
         receiver.speaking.on('start', (userId) => {
-            console.log(`🎯 Speaking start detected for user ID: ${userId}`);
+            // Only log for speech monitoring target to reduce spam
+            if (speechMonitoringEnabled && userId === speechTargetUserId) {
+                console.log(`🎯 Speech target speaking detected for user ID: ${userId}`);
+            }
             
             const member = channel.guild.members.cache.get(userId);
             if (!member) {
-                console.log(`❌ Could not find member for user ID: ${userId}`);
+                if (speechMonitoringEnabled && userId === speechTargetUserId) {
+                    console.log(`❌ Could not find member for speech target user ID: ${userId}`);
+                }
                 return;
             }
 
             const userName = member.user.tag;
             const currentCount = speakingCounts.get(userId) || 0;
             speakingCounts.set(userId, currentCount + 1);
-            console.log(`🎤 ${userName} started speaking (count: ${currentCount + 1})`);
+            
+            // Only log for speech monitoring target
+            if (speechMonitoringEnabled && userId === speechTargetUserId) {
+                console.log(`🎤 ${userName} started speaking (count: ${currentCount + 1})`);
+            }
 
             // Check speech monitoring for specific target
             if (speechMonitoringEnabled && userId === speechTargetUserId) {
@@ -701,27 +722,63 @@ function setupSpeakingDetection(connection, channel) {
                 
                 if (speechCount >= speechLimit) {
                     // Timeout the user
-                    console.log(`🚫 ${userName} reached speech limit (${speechLimit}) - timing out!`);
+                    console.log(`🚫 ${userName} reached speech limit (${speechLimit}) - attempting timeout!`);
                     
-                    member.timeout(5 * 60 * 1000, `Exceeded speech limit (${speechLimit} times)`) // 5 minute timeout
-                        .then(() => {
-                            console.log(`✅ Successfully timed out ${userName} for 5 minutes`);
-                            speechMonitoringEnabled = false; // Auto-disable after timeout
-                            // Leave voice channel after timeout
-                            leaveVoiceChannel(channel);
-                        })
-                        .catch(error => {
-                            console.error(`❌ Failed to timeout ${userName}: ${error.message}`);
-                        });
+                    // Check if bot has permission to timeout members
+                    const botMember = channel.guild.members.me;
+                    const canTimeout = botMember.permissions.has('ModerateMembers');
+                    
+                    if (!canTimeout) {
+                        console.error(`❌ Bot lacks 'Moderate Members' permission to timeout ${userName}`);
+                        console.log(`🦵 Falling back to kicking ${userName} from voice instead`);
+                        
+                        // Fallback to kicking from voice if no timeout permission
+                        member.voice.disconnect(`Exceeded speech limit (${speechLimit} times) - kicked due to no timeout permission`)
+                            .then(() => {
+                                console.log(`✅ Successfully kicked ${userName} from voice (fallback)`);
+                                speechMonitoringEnabled = false;
+                                leaveVoiceChannel(channel);
+                            })
+                            .catch(kickError => {
+                                console.error(`❌ Failed to kick ${userName}: ${kickError.message}`);
+                            });
+                    } else {
+                        // Bot has permission, attempt timeout
+                        member.timeout(5 * 60 * 1000, `Exceeded speech limit (${speechLimit} times)`) // 5 minute timeout
+                            .then(() => {
+                                console.log(`✅ Successfully timed out ${userName} for 5 minutes`);
+                                speechMonitoringEnabled = false; // Auto-disable after timeout
+                                // Leave voice channel after timeout
+                                leaveVoiceChannel(channel);
+                            })
+                            .catch(error => {
+                                console.error(`❌ Failed to timeout ${userName}: ${error.message}`);
+                                console.log(`🦵 Falling back to kicking ${userName} from voice`);
+                                
+                                // Fallback to voice kick if timeout fails
+                                member.voice.disconnect(`Exceeded speech limit (${speechLimit} times) - timeout failed`)
+                                    .then(() => {
+                                        console.log(`✅ Successfully kicked ${userName} from voice (timeout fallback)`);
+                                        speechMonitoringEnabled = false;
+                                        leaveVoiceChannel(channel);
+                                    })
+                                    .catch(kickError => {
+                                        console.error(`❌ Failed to kick ${userName}: ${kickError.message}`);
+                                    });
+                            });
+                    }
                 }
             }
         });
 
         // Listen for users stopping speaking
         receiver.speaking.on('end', (userId) => {
-            const member = channel.guild.members.cache.get(userId);
-            if (member) {
-                console.log(`🔇 ${member.user.tag} stopped speaking`);
+            // Only log for speech monitoring target to reduce spam
+            if (speechMonitoringEnabled && userId === speechTargetUserId) {
+                const member = channel.guild.members.cache.get(userId);
+                if (member) {
+                    console.log(`🔇 ${member.user.tag} stopped speaking`);
+                }
             }
         });
 
@@ -835,16 +892,44 @@ client.on('messageCreate', (message) => {
         if (speechCount >= speechLimit) {
             console.log(`🚫 ${member.user.tag} reached speech limit (${speechLimit}) - timing out!`);
             
-            member.timeout(5 * 60 * 1000, `Exceeded speech limit (${speechLimit} times)`)
-                .then(() => {
-                    console.log(`✅ Successfully timed out ${member.user.tag} for 5 minutes`);
-                    speechMonitoringEnabled = false;
-                    const channel = member.voice.channel;
-                    if (channel) leaveVoiceChannel(channel);
-                })
-                .catch(error => {
-                    console.error(`❌ Failed to timeout ${member.user.tag}: ${error.message}`);
-                });
+            // Check if bot has permission to timeout users
+            const botMember = message.guild.members.cache.get(client.user.id);
+            if (botMember && botMember.permissions.has('ModerateMembers')) {
+                member.timeout(5 * 60 * 1000, `Exceeded speech limit (${speechLimit} times)`)
+                    .then(() => {
+                        console.log(`✅ Successfully timed out ${member.user.tag} for 5 minutes`);
+                        speechMonitoringEnabled = false;
+                        const channel = member.voice.channel;
+                        if (channel) leaveVoiceChannel(channel);
+                    })
+                    .catch(error => {
+                        console.error(`❌ Failed to timeout ${member.user.tag}: ${error.message}`);
+                        // Fallback to voice kick if timeout fails
+                        console.log(`⚠️ Falling back to voice disconnect...`);
+                        member.voice.disconnect('Exceeded speech limit')
+                            .then(() => {
+                                console.log(`✅ Successfully disconnected ${member.user.tag} from voice`);
+                                speechMonitoringEnabled = false;
+                                const channel = member.voice.channel;
+                                if (channel) leaveVoiceChannel(channel);
+                            })
+                            .catch(kickError => {
+                                console.error(`❌ Failed to disconnect user from voice: ${kickError.message}`);
+                            });
+                    });
+            } else {
+                console.log(`⚠️ No timeout permission - using voice disconnect instead`);
+                member.voice.disconnect('Exceeded speech limit')
+                    .then(() => {
+                        console.log(`✅ Successfully disconnected ${member.user.tag} from voice`);
+                        speechMonitoringEnabled = false;
+                        const channel = member.voice.channel;
+                        if (channel) leaveVoiceChannel(channel);
+                    })
+                    .catch(error => {
+                        console.error(`❌ Failed to disconnect user from voice: ${error.message}`);
+                    });
+            }
         }
         
         // Delete the test message
